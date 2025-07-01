@@ -1,0 +1,109 @@
+[package]
+name = "autogen-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Foundational interfaces and agent runtime implementation for AutoGen"
+readme = "README.md"
+
+[dependencies]
+# Core dependencies (always included)
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true, features = ["serde"] }
+
+# Async runtime (optional)
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+
+# Serialization formats (optional)
+prost = { workspace = true, optional = true }
+prost-types = { workspace = true, optional = true }
+
+# Error handling (optional)
+anyhow = { workspace = true, optional = true }
+
+# Tracing and telemetry (optional)
+tracing = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+
+# Utilities (optional)
+url = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+dashmap = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+
+# HTTP client (optional)
+reqwest = { workspace = true, optional = true }
+
+# Image processing (optional)
+image = { workspace = true, optional = true }
+
+# Configuration (optional)
+config = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
+
+# JSON Schema validation (optional)
+jsonschema = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
+mockall = { workspace = true }
+criterion = { workspace = true }
+
+[features]
+default = ["runtime", "json", "validation"]
+
+# Core features
+runtime = ["tokio", "tokio-util", "futures"]
+json = ["serde_json"]
+validation = ["jsonschema", "regex"]
+
+# Serialization formats
+protobuf = ["prost", "prost-types"]
+all-serialization = ["json", "protobuf"]
+
+# Networking and HTTP
+http = ["reqwest", "url", "bytes"]
+networking = ["http"]
+
+# Telemetry and observability
+tracing = ["dep:tracing"]
+telemetry = ["tracing", "opentelemetry", "opentelemetry-semantic-conventions"]
+
+# Image processing
+images = ["image"]
+
+# Configuration management
+config-support = ["config", "toml"]
+
+# Development and testing
+testing = ["anyhow", "dashmap"]
+
+# Convenience feature combinations
+full = [
+    "runtime",
+    "all-serialization",
+    "networking",
+    "telemetry",
+    "images",
+    "config-support",
+    "validation"
+]
+
+# Minimal feature set for embedded or constrained environments
+minimal = ["json"]
+
+

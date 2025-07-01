@@ -1,0 +1,127 @@
+//! # AutoGen Core
+//!
+//! AutoGen core offers an easy way to quickly build event-driven, distributed, 
+//! scalable, resilient AI agent systems. Agents are developed using the Actor model.
+//! You can build and run your agent system locally and easily move to a distributed 
+//! system in the cloud when you are ready.
+//!
+//! ## Features
+//!
+//! - **Event-driven architecture**: Built on async/await and message passing
+//! - **Type-safe agents**: Leverage Rust's type system for reliable agent interactions
+//! - **Flexible runtime**: Support for single-threaded and distributed deployments
+//! - **LLM integration**: Unified interface for various language models
+//! - **Tool calling**: Built-in support for function calling and code execution
+//! - **Observability**: Integrated tracing and telemetry
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use autogen_core::{AgentId, TopicId, MessageContext, CancellationToken};
+//!
+//! // Create an agent ID
+//! let agent_id = AgentId::new("assistant", "main").unwrap();
+//! assert_eq!(agent_id.agent_type(), "assistant");
+//! assert_eq!(agent_id.key(), "main");
+//!
+//! // Create a topic ID
+//! let topic_id = TopicId::new("user.message", "session_1").unwrap();
+//! assert_eq!(topic_id.topic_type(), "user.message");
+//! assert_eq!(topic_id.source(), "session_1");
+//!
+//! // Create a message context
+//! let token = CancellationToken::new();
+//! let context = MessageContext::direct_message(Some(agent_id), token);
+//! ```
+
+#![deny(missing_docs)]
+#![warn(clippy::all)]
+#![allow(clippy::module_inception)]
+
+// Error types (must be first for other modules to use)
+pub mod error;
+
+// Core traits and types
+pub mod agent;
+pub mod agent_id;
+pub mod topic;
+pub mod message;
+pub mod cancellation;
+
+// Serialization system (requires serialization features)
+#[cfg(any(feature = "json", feature = "protobuf"))]
+pub mod serialization;
+
+// Subscription system
+pub mod subscription;
+
+// Agent runtime system (requires runtime feature)
+#[cfg(feature = "runtime")]
+pub mod agent_runtime;
+#[cfg(feature = "runtime")]
+pub mod single_threaded_runtime;
+
+// Core modules
+pub mod memory;
+pub mod models;
+pub mod model_context;
+pub mod tools;
+pub mod tool_agent;
+pub mod utils;
+
+// These modules will be implemented in subsequent tasks
+// pub mod base_agent;
+// pub mod closure_agent;
+// pub mod routed_agent;
+// pub mod cache;
+// pub mod component;
+// pub mod telemetry;
+// pub mod code_executor;
+
+// Re-exports for convenience
+pub use error::{AutoGenError, Result};
+pub use agent_id::{AgentId, AgentType};
+pub use topic::{DefaultTopicId, TopicId};
+pub use message::{
+    MessageContext, MessageHandler, FunctionCall, Message,
+    TypedMessageEnvelope, UntypedMessageEnvelope, TextMessage,
+    RequestMessage, ResponseMessage, NoResponse
+};
+pub use cancellation::CancellationToken;
+pub use agent::{Agent, AgentMetadata, AgentProxy, RuntimeHandle};
+#[cfg(any(feature = "json", feature = "protobuf"))]
+pub use serialization::{MessageSerializer, JsonMessageSerializer, SerializedMessage, JSON_DATA_CONTENT_TYPE, PROTOBUF_DATA_CONTENT_TYPE};
+pub use subscription::{Subscription, DefaultSubscription, TypeSubscription, TopicSubscription, TypePrefixSubscription, SubscriptionRegistry};
+#[cfg(feature = "runtime")]
+pub use agent_runtime::{AgentRuntime, RuntimeConfig, RuntimeStats, RuntimeEvent, RuntimeEventHandler, LoggingEventHandler};
+pub use single_threaded_runtime::SingleThreadedAgentRuntime;
+
+// These will be implemented in subsequent tasks
+// pub use agent::{Agent, AgentMetadata, AgentProxy};
+// pub use agent_runtime::AgentRuntime;
+// pub use base_agent::BaseAgent;
+// pub use cache::{CacheStore, InMemoryStore};
+// pub use closure_agent::{ClosureAgent, ClosureContext};
+// pub use component::{Component, ComponentConfig};
+// pub use models::{ChatCompletionClient, LLMMessage};
+// pub use routed_agent::RoutedAgent;
+// pub use serialization::{MessageSerializer, JSON_DATA_CONTENT_TYPE, PROTOBUF_DATA_CONTENT_TYPE};
+// pub use single_threaded_runtime::SingleThreadedAgentRuntime;
+// pub use subscription::{DefaultSubscription, Subscription, TypeSubscription};
+// pub use telemetry::{trace_agent_span, trace_tool_span};
+// pub use tools::{FunctionTool, Tool, ToolResult};
+
+// Macros for agent development (will be implemented later)
+// pub use autogen_core_macros::{agent, message_handler, rpc};
+
+/// Current version of autogen-core
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Root logger name for the autogen-core library
+pub const ROOT_LOGGER_NAME: &str = "autogen_core";
+
+/// Event logger name for agent events
+pub const EVENT_LOGGER_NAME: &str = "autogen_core.events";
+
+/// Trace logger name for distributed tracing
+pub const TRACE_LOGGER_NAME: &str = "autogen_core.trace";
