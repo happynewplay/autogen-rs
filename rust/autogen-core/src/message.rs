@@ -73,6 +73,113 @@ pub struct UntypedMessageEnvelope {
     pub type_id: TypeId,
 }
 
+/// High-performance message router using type-based dispatch
+#[derive(Debug)]
+pub struct MessageRouter {
+    /// Type-specific handlers for fast dispatch
+    handlers: std::collections::HashMap<TypeId, Box<dyn MessageHandlerDispatch>>,
+}
+
+/// Trait for type-specific message handling dispatch
+trait MessageHandlerDispatch: Send + Sync {
+    /// Dispatch a message to the appropriate handler
+    fn dispatch(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>>;
+
+    /// Get the message type this handler supports
+    fn message_type(&self) -> TypeId;
+}
+
+/// Concrete implementation of message handler dispatch
+struct TypedMessageHandlerDispatch<M: Message> {
+    handler: Box<dyn Fn(TypedMessageEnvelope<M>) -> Result<Option<TypedMessageEnvelope<M::Response>>> + Send + Sync>,
+}
+
+impl<M: Message> MessageHandlerDispatch for TypedMessageHandlerDispatch<M> {
+    fn dispatch(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>> {
+        // Fast path: check type ID first
+        if envelope.type_id != TypeId::of::<M>() {
+            return Err(crate::AutoGenError::other(format!(
+                "Type mismatch: expected {}, got {}",
+                std::any::type_name::<M>(),
+                envelope.message_type
+            )));
+        }
+
+        // Safe downcast (we've verified the type)
+        let typed_envelope = envelope.downcast::<M>().map_err(|_| {
+            crate::AutoGenError::other("Failed to downcast message despite type check")
+        })?;
+
+        // Call the handler
+        if let Some(response_envelope) = (self.handler)(typed_envelope)? {
+            Ok(Some(response_envelope.into_untyped()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn message_type(&self) -> TypeId {
+        TypeId::of::<M>()
+    }
+}
+
+impl MessageRouter {
+    /// Create a new message router
+    pub fn new() -> Self {
+        Self {
+            handlers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Register a typed message handler
+    pub fn register_handler<M: Message, F>(&mut self, handler: F) -> Result<()>
+    where
+        F: Fn(TypedMessageEnvelope<M>) -> Result<Option<TypedMessageEnvelope<M::Response>>> + Send + Sync + 'static,
+    {
+        let type_id = TypeId::of::<M>();
+        let dispatch = TypedMessageHandlerDispatch {
+            handler: Box::new(handler),
+        };
+
+        if self.handlers.insert(type_id, Box::new(dispatch)).is_some() {
+            return Err(crate::AutoGenError::other(format!(
+                "Handler for type {} already registered",
+                std::any::type_name::<M>()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Route a message to the appropriate handler
+    pub fn route(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>> {
+        if let Some(handler) = self.handlers.get(&envelope.type_id) {
+            handler.dispatch(envelope)
+        } else {
+            Err(crate::AutoGenError::other(format!(
+                "No handler registered for message type: {}",
+                envelope.message_type
+            )))
+        }
+    }
+
+    /// Get the number of registered handlers
+    pub fn handler_count(&self) -> usize {
+        self.handlers.len()
+    }
+
+    /// Check if a handler is registered for a specific type
+    pub fn has_handler<M: Message>(&self) -> bool {
+        self.handlers.contains_key(&TypeId::of::<M>())
+    }
+}
+
+impl Default for MessageRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UntypedMessageEnvelope {
     /// Attempt to downcast to a specific message type
     pub fn downcast<M: Message>(self) -> Result<TypedMessageEnvelope<M>, Self> {

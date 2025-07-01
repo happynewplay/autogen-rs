@@ -6,7 +6,7 @@
 use crate::{
     Agent, AgentId, AgentRuntime, CancellationToken, MessageContext, Result, RuntimeConfig,
     RuntimeEvent, RuntimeEventHandler, RuntimeStats, Subscription, SubscriptionRegistry, TopicId,
-    AutoGenError,
+    AutoGenError, AgentRegistry, MessageRouter, UntypedMessageEnvelope,
 };
 use async_trait::async_trait;
 use std::any::Any;
@@ -14,38 +14,56 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-/// Single-threaded agent runtime
+/// Single-threaded agent runtime with performance optimizations
 ///
 /// A simple, single-threaded implementation of the agent runtime that processes
-/// messages sequentially. This is suitable for development, testing, and simple
-/// applications that don't require high concurrency.
+/// messages sequentially. This version uses optimized data structures for better
+/// performance while maintaining simplicity.
 pub struct SingleThreadedAgentRuntime {
-    /// Registered agents
-    agents: HashMap<AgentId, Box<dyn Agent>>,
-    
+    /// High-performance agent registry
+    agent_registry: AgentRegistry,
+
     /// Subscription registry
     subscription_registry: SubscriptionRegistry,
-    
+
     /// Runtime configuration
     config: RuntimeConfig,
-    
+
     /// Runtime statistics
     stats: RuntimeStats,
-    
+
     /// Whether the runtime is currently running
     is_running: bool,
-    
+
     /// Event handlers
     event_handlers: Vec<Box<dyn RuntimeEventHandler>>,
-    
+
     /// Message queue sender
     message_sender: Option<mpsc::UnboundedSender<RuntimeMessage>>,
-    
+
     /// Message queue receiver
     message_receiver: Option<mpsc::UnboundedReceiver<RuntimeMessage>>,
-    
+
     /// Cancellation token for stopping the runtime
     cancellation_token: CancellationToken,
+
+    /// Performance metrics tracking
+    performance_metrics: PerformanceMetrics,
+}
+
+/// Performance metrics for the runtime
+#[derive(Debug, Default, Clone)]
+pub struct PerformanceMetrics {
+    /// Total messages processed
+    pub messages_processed: u64,
+    /// Average message processing time (microseconds)
+    pub avg_processing_time_us: f64,
+    /// Peak memory usage (bytes)
+    pub peak_memory_usage: usize,
+    /// Agent lookup cache hits
+    pub cache_hits: u64,
+    /// Agent lookup cache misses
+    pub cache_misses: u64,
 }
 
 /// Internal message type for the runtime
@@ -82,9 +100,9 @@ impl SingleThreadedAgentRuntime {
     /// ```
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
-        
+
         Self {
-            agents: HashMap::new(),
+            agent_registry: AgentRegistry::new(),
             subscription_registry: SubscriptionRegistry::new(),
             config: RuntimeConfig::default(),
             stats: RuntimeStats::default(),
@@ -93,6 +111,7 @@ impl SingleThreadedAgentRuntime {
             message_sender: Some(sender),
             message_receiver: Some(receiver),
             cancellation_token: CancellationToken::new(),
+            performance_metrics: PerformanceMetrics::default(),
         }
     }
 

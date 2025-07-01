@@ -6,13 +6,17 @@
 //! This module is only available when the "runtime" feature is enabled.
 
 #[cfg(feature = "runtime")]
-use crate::{Agent, AgentId, Result, TopicId, Subscription};
+use crate::{Agent, AgentId, Result, TopicId, Subscription, MessageRouter, UntypedMessageEnvelope};
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
 use std::any::Any;
 #[cfg(feature = "runtime")]
 use std::collections::HashMap;
+#[cfg(feature = "runtime")]
+use std::sync::Arc;
+#[cfg(feature = "runtime")]
+use tokio::sync::RwLock;
 
 #[cfg(feature = "runtime")]
 /// Core trait for agent runtimes
@@ -129,6 +133,169 @@ pub trait AgentRuntime: Send + Sync {
     /// # Arguments
     /// * `state` - The state to load (from save_state)
     async fn load_state(&mut self, state: HashMap<AgentId, HashMap<String, serde_json::Value>>) -> Result<()>;
+}
+
+/// High-performance agent registry with optimized lookups
+#[cfg(feature = "runtime")]
+#[derive(Debug)]
+pub struct AgentRegistry {
+    /// Agents indexed by ID for O(1) lookup
+    agents: Arc<RwLock<HashMap<AgentId, Arc<RwLock<dyn Agent>>>>>,
+    /// Type-based routing for fast message dispatch
+    message_router: Arc<RwLock<MessageRouter>>,
+    /// Agent metadata cache
+    metadata_cache: Arc<RwLock<HashMap<AgentId, AgentMetadata>>>,
+    /// Performance metrics
+    metrics: Arc<RwLock<RegistryMetrics>>,
+}
+
+#[cfg(feature = "runtime")]
+#[derive(Debug, Default)]
+pub struct RegistryMetrics {
+    /// Total number of registered agents
+    pub agent_count: usize,
+    /// Total messages routed
+    pub messages_routed: u64,
+    /// Average message routing time (microseconds)
+    pub avg_routing_time_us: f64,
+    /// Cache hit rate for agent lookups
+    pub cache_hit_rate: f64,
+}
+
+#[cfg(feature = "runtime")]
+impl AgentRegistry {
+    /// Create a new agent registry
+    pub fn new() -> Self {
+        Self {
+            agents: Arc::new(RwLock::new(HashMap::new())),
+            message_router: Arc::new(RwLock::new(MessageRouter::new())),
+            metadata_cache: Arc::new(RwLock::new(HashMap::new())),
+            metrics: Arc::new(RwLock::new(RegistryMetrics::default())),
+        }
+    }
+
+    /// Register an agent with optimized storage
+    pub async fn register_agent(&self, agent_id: AgentId, agent: Box<dyn Agent>) -> Result<()> {
+        let agent_arc = Arc::new(RwLock::new(agent));
+
+        // Store agent
+        {
+            let mut agents = self.agents.write().await;
+            if agents.insert(agent_id.clone(), agent_arc.clone()).is_some() {
+                return Err(crate::AutoGenError::other(format!(
+                    "Agent with ID {} already registered", agent_id
+                )));
+            }
+        }
+
+        // Cache metadata
+        {
+            let agent_guard = agent_arc.read().await;
+            let metadata = agent_guard.metadata();
+            let mut cache = self.metadata_cache.write().await;
+            cache.insert(agent_id.clone(), metadata);
+        }
+
+        // Update metrics
+        {
+            let mut metrics = self.metrics.write().await;
+            metrics.agent_count += 1;
+        }
+
+        Ok(())
+    }
+
+    /// Unregister an agent
+    pub async fn unregister_agent(&self, agent_id: &AgentId) -> Result<()> {
+        let removed = {
+            let mut agents = self.agents.write().await;
+            agents.remove(agent_id)
+        };
+
+        if removed.is_some() {
+            // Remove from metadata cache
+            {
+                let mut cache = self.metadata_cache.write().await;
+                cache.remove(agent_id);
+            }
+
+            // Update metrics
+            {
+                let mut metrics = self.metrics.write().await;
+                metrics.agent_count = metrics.agent_count.saturating_sub(1);
+            }
+
+            Ok(())
+        } else {
+            Err(crate::AutoGenError::agent_not_found(agent_id.clone(), vec![]))
+        }
+    }
+
+    /// Get an agent by ID with optimized lookup
+    pub async fn get_agent(&self, agent_id: &AgentId) -> Option<Arc<RwLock<dyn Agent>>> {
+        let agents = self.agents.read().await;
+        agents.get(agent_id).cloned()
+    }
+
+    /// Get agent metadata from cache
+    pub async fn get_agent_metadata(&self, agent_id: &AgentId) -> Option<AgentMetadata> {
+        let cache = self.metadata_cache.read().await;
+        cache.get(agent_id).cloned()
+    }
+
+    /// List all registered agent IDs
+    pub async fn list_agents(&self) -> Vec<AgentId> {
+        let agents = self.agents.read().await;
+        agents.keys().cloned().collect()
+    }
+
+    /// Get registry metrics
+    pub async fn get_metrics(&self) -> RegistryMetrics {
+        let metrics = self.metrics.read().await;
+        metrics.clone()
+    }
+
+    /// Route a message with performance tracking
+    pub async fn route_message(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>> {
+        let start_time = std::time::Instant::now();
+
+        let result = {
+            let router = self.message_router.read().await;
+            router.route(envelope)
+        };
+
+        // Update metrics
+        {
+            let mut metrics = self.metrics.write().await;
+            metrics.messages_routed += 1;
+
+            let routing_time = start_time.elapsed().as_micros() as f64;
+            metrics.avg_routing_time_us =
+                (metrics.avg_routing_time_us * (metrics.messages_routed - 1) as f64 + routing_time)
+                / metrics.messages_routed as f64;
+        }
+
+        result
+    }
+
+    /// Batch register multiple agents for better performance
+    pub async fn batch_register_agents(&self, agents: Vec<(AgentId, Box<dyn Agent>)>) -> Result<Vec<Result<()>>> {
+        let mut results = Vec::with_capacity(agents.len());
+
+        for (agent_id, agent) in agents {
+            let result = self.register_agent(agent_id, agent).await;
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl Default for AgentRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(feature = "runtime")]
