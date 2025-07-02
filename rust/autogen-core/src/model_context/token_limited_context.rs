@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use crate::{
-    error::Result, 
-    models::{LLMMessage, ChatCompletionClient},
+    error::Result,
+    models::LLMMessage,
     tools::ToolSchema,
 };
 use super::chat_completion_context::{BaseChatCompletionContext, ChatCompletionContext};

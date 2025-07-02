@@ -338,8 +338,14 @@ impl RuntimeHandle {
         _target: AgentId,
         _message: Box<dyn Any + Send>,
     ) -> Result<R> {
-        // TODO: Implement actual request/response
-        todo!("Request/response not yet implemented")
+        // For now, return an error indicating this feature is not yet implemented
+        // In a full implementation, this would:
+        // 1. Send the message to the target agent via the runtime
+        // 2. Wait for a response with a timeout
+        // 3. Return the typed response
+        Err(crate::AutoGenError::other(
+            "Request/response messaging is not yet implemented. Use publish_message for one-way communication."
+        ))
     }
 
     /// Publish a message to a topic

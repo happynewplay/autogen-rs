@@ -1,5 +1,6 @@
 //! JSON utility functions for parsing and extracting JSON from strings.
 
+#[cfg(feature = "validation")]
 use regex::Regex;
 use serde_json::{Value, Map};
 use thiserror::Error;
@@ -61,7 +62,11 @@ pub enum JsonExtractionError {
 /// ```
 pub fn extract_json_from_str(content: &str) -> Result<Vec<Value>, JsonExtractionError> {
     // Regex pattern to match code blocks with optional language specification
+    #[cfg(feature = "validation")]
     let pattern = Regex::new(r"```(?:\s*([\w\+\-]+))?\n([\s\S]*?)```").unwrap();
+
+    #[cfg(feature = "validation")]
+    {
     let matches: Vec<_> = pattern.captures_iter(content).collect();
     let mut results = Vec::new();
 
@@ -95,6 +100,19 @@ pub fn extract_json_from_str(content: &str) -> Result<Vec<Value>, JsonExtraction
         Err(JsonExtractionError::NoJsonFound)
     } else {
         Ok(results)
+    }
+    }
+
+    #[cfg(not(feature = "validation"))]
+    {
+        // Simple fallback without regex - just try to parse the entire content as JSON
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return Err(JsonExtractionError::NoJsonFound);
+        }
+
+        let json_value: Value = serde_json::from_str(trimmed)?;
+        Ok(vec![json_value])
     }
 }
 

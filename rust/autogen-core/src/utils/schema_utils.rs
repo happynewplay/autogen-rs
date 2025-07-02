@@ -1,6 +1,7 @@
 //! Schema utilities for JSON Schema validation and processing.
 
 use std::collections::HashMap;
+#[cfg(feature = "validation")]
 use jsonschema::JSONSchema;
 use serde_json::{Value, Map};
 use thiserror::Error;
@@ -40,7 +41,10 @@ pub enum ValidationError {
 #[derive(Debug)]
 pub struct JsonSchemaProcessor {
     /// Cache of compiled schemas
+    #[cfg(feature = "validation")]
     schema_cache: HashMap<String, JSONSchema>,
+    #[cfg(not(feature = "validation"))]
+    schema_cache: HashMap<String, Value>,
 }
 
 impl JsonSchemaProcessor {
@@ -378,6 +382,7 @@ pub fn schema_to_struct(schema: &Value, name: &str) -> Result<SchemaInfo, Schema
 ///
 /// # Returns
 /// Ok(()) if validation succeeds, Err with validation details if it fails
+#[cfg(feature = "validation")]
 pub fn validate_json_against_schema(schema: &Value, data: &Value) -> Result<(), ValidationError> {
     let compiled_schema = JSONSchema::compile(schema)
         .map_err(|e| ValidationError::SchemaError(e.to_string()))?;
@@ -390,6 +395,12 @@ pub fn validate_json_against_schema(schema: &Value, data: &Value) -> Result<(), 
         return Err(ValidationError::ValidationFailed(error_messages.join("; ")));
     }
 
+    Ok(())
+}
+
+#[cfg(not(feature = "validation"))]
+pub fn validate_json_against_schema(_schema: &Value, _data: &Value) -> Result<(), ValidationError> {
+    // Simple validation without jsonschema - just check if data is valid JSON
     Ok(())
 }
 

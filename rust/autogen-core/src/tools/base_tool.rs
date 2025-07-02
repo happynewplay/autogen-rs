@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use async_trait::async_trait;
+#[cfg(feature = "runtime")]
 use futures::Stream;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use crate::{CancellationToken, error::Result};
@@ -238,6 +239,7 @@ pub trait Tool: Send + Sync {
 }
 
 /// Trait for tools that support streaming results
+#[cfg(feature = "runtime")]
 #[async_trait]
 pub trait StreamTool: Tool {
     /// Run the tool with streaming output
@@ -323,8 +325,11 @@ impl Tool for BaseTool {
         _cancellation_token: Option<CancellationToken>,
         _call_id: Option<String>,
     ) -> Result<serde_json::Value> {
-        // Base implementation - should be overridden
-        Ok(serde_json::Value::Null)
+        // Base implementation - should be overridden by concrete implementations
+        Err(crate::AutoGenError::other(format!(
+            "Tool '{}' does not implement run_json method. This is a base implementation that should be overridden.",
+            self.name()
+        )))
     }
 }
 
@@ -342,11 +347,13 @@ pub trait BaseToolWithState: Tool {
 }
 
 /// Base streaming tool implementation
+#[cfg(feature = "runtime")]
 #[derive(Debug)]
 pub struct BaseStreamTool {
     base: BaseTool,
 }
 
+#[cfg(feature = "runtime")]
 impl BaseStreamTool {
     /// Create a new base stream tool
     pub fn new(
@@ -361,6 +368,7 @@ impl BaseStreamTool {
     }
 }
 
+#[cfg(feature = "runtime")]
 #[async_trait]
 impl Tool for BaseStreamTool {
     fn name(&self) -> &str {
@@ -389,6 +397,7 @@ impl Tool for BaseStreamTool {
     }
 }
 
+#[cfg(feature = "runtime")]
 #[async_trait]
 impl StreamTool for BaseStreamTool {
     async fn run_stream(

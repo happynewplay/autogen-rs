@@ -228,7 +228,10 @@ impl Tool for FunctionTool {
         };
         
         // In a real implementation, this would use the logging system
+        #[cfg(feature = "tracing")]
         tracing::info!("Tool call: {:?}", event);
+        #[cfg(not(feature = "tracing"))]
+        let _ = event; // Suppress unused variable warning
         
         Ok(result)
     }

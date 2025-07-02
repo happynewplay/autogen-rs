@@ -4,6 +4,7 @@
 //! in the autogen system, following the Python autogen-core design.
 
 use crate::error::{AutoGenError, Result};
+#[cfg(feature = "validation")]
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -11,8 +12,16 @@ use std::fmt;
 /// Validates if a string is a valid topic type according to cloud event spec
 /// Must match the pattern: ^[\w\-\.\:=]+\Z
 fn is_valid_topic_type(value: &str) -> bool {
-    let re = Regex::new(r"^[\w\-\.\:=]+$").unwrap();
-    re.is_match(value)
+    #[cfg(feature = "validation")]
+    {
+        let re = Regex::new(r"^[\w\-\.\:=]+$").unwrap();
+        re.is_match(value)
+    }
+    #[cfg(not(feature = "validation"))]
+    {
+        // Basic validation without regex
+        !value.is_empty() && value.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '.' || c == ':' || c == '=' || c == '_')
+    }
 }
 
 /// TopicId defines the scope of a broadcast message
@@ -55,6 +64,7 @@ impl TopicId {
                     "Invalid topic type: {}. Must match pattern: ^[\\w\\-\\.\\:=]+\\Z",
                     topic_type
                 ),
+                context: crate::error::ErrorContext::new("topic_type_validation"),
             });
         }
 

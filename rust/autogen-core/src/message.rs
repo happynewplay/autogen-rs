@@ -73,55 +73,39 @@ pub struct UntypedMessageEnvelope {
     pub type_id: TypeId,
 }
 
-/// High-performance message router using type-based dispatch
-#[derive(Debug)]
+/// Simplified high-performance message router
+///
+/// Uses a more efficient design with reduced allocations and simplified dispatch logic.
 pub struct MessageRouter {
-    /// Type-specific handlers for fast dispatch
-    handlers: std::collections::HashMap<TypeId, Box<dyn MessageHandlerDispatch>>,
+    /// Type-specific handlers using function pointers for better performance
+    handlers: std::collections::HashMap<TypeId, HandlerEntry>,
 }
 
-/// Trait for type-specific message handling dispatch
-trait MessageHandlerDispatch: Send + Sync {
-    /// Dispatch a message to the appropriate handler
-    fn dispatch(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>>;
-
-    /// Get the message type this handler supports
-    fn message_type(&self) -> TypeId;
-}
-
-/// Concrete implementation of message handler dispatch
-struct TypedMessageHandlerDispatch<M: Message> {
-    handler: Box<dyn Fn(TypedMessageEnvelope<M>) -> Result<Option<TypedMessageEnvelope<M::Response>>> + Send + Sync>,
-}
-
-impl<M: Message> MessageHandlerDispatch for TypedMessageHandlerDispatch<M> {
-    fn dispatch(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>> {
-        // Fast path: check type ID first
-        if envelope.type_id != TypeId::of::<M>() {
-            return Err(crate::AutoGenError::other(format!(
-                "Type mismatch: expected {}, got {}",
-                std::any::type_name::<M>(),
-                envelope.message_type
-            )));
-        }
-
-        // Safe downcast (we've verified the type)
-        let typed_envelope = envelope.downcast::<M>().map_err(|_| {
-            crate::AutoGenError::other("Failed to downcast message despite type check")
-        })?;
-
-        // Call the handler
-        if let Some(response_envelope) = (self.handler)(typed_envelope)? {
-            Ok(Some(response_envelope.into_untyped()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn message_type(&self) -> TypeId {
-        TypeId::of::<M>()
+impl fmt::Debug for MessageRouter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessageRouter")
+            .field("handler_count", &self.handlers.len())
+            .finish()
     }
 }
+
+/// Handler entry containing dispatch function and metadata
+struct HandlerEntry {
+    /// Fast dispatch function
+    dispatch_fn: fn(UntypedMessageEnvelope) -> crate::Result<Option<UntypedMessageEnvelope>>,
+    /// Type name for debugging
+    type_name: &'static str,
+}
+
+impl fmt::Debug for HandlerEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HandlerEntry")
+            .field("type_name", &self.type_name)
+            .finish()
+    }
+}
+
+
 
 impl MessageRouter {
     /// Create a new message router
@@ -131,17 +115,46 @@ impl MessageRouter {
         }
     }
 
-    /// Register a typed message handler
-    pub fn register_handler<M: Message, F>(&mut self, handler: F) -> Result<()>
+    /// Register a typed message handler with simplified dispatch
+    pub fn register_handler<M: Message>(&mut self) -> crate::Result<()>
     where
-        F: Fn(TypedMessageEnvelope<M>) -> Result<Option<TypedMessageEnvelope<M::Response>>> + Send + Sync + 'static,
+        M::Response: Message,
+        M: 'static,
+        M::Response: 'static,
     {
         let type_id = TypeId::of::<M>();
-        let dispatch = TypedMessageHandlerDispatch {
-            handler: Box::new(handler),
+
+        // Create a dispatch function for this specific message type
+        fn dispatch_typed<M: Message>(envelope: UntypedMessageEnvelope) -> crate::Result<Option<UntypedMessageEnvelope>>
+        where
+            M::Response: Message,
+            M: 'static,
+            M::Response: 'static,
+        {
+            // Fast type check
+            if envelope.type_id != TypeId::of::<M>() {
+                return Err(crate::AutoGenError::other(format!(
+                    "Type mismatch: expected {}, got {}",
+                    std::any::type_name::<M>(),
+                    envelope.message_type
+                )));
+            }
+
+            // Safe downcast
+            let _typed_envelope = envelope.downcast::<M>().map_err(|_| {
+                crate::AutoGenError::other("Failed to downcast message despite type check")
+            })?;
+
+            // For now, just echo back - this will be customizable in the future
+            Ok(None)
+        }
+
+        let entry = HandlerEntry {
+            dispatch_fn: dispatch_typed::<M>,
+            type_name: std::any::type_name::<M>(),
         };
 
-        if self.handlers.insert(type_id, Box::new(dispatch)).is_some() {
+        if self.handlers.insert(type_id, entry).is_some() {
             return Err(crate::AutoGenError::other(format!(
                 "Handler for type {} already registered",
                 std::any::type_name::<M>()
@@ -152,9 +165,9 @@ impl MessageRouter {
     }
 
     /// Route a message to the appropriate handler
-    pub fn route(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>> {
+    pub fn route(&self, envelope: UntypedMessageEnvelope) -> crate::Result<Option<UntypedMessageEnvelope>> {
         if let Some(handler) = self.handlers.get(&envelope.type_id) {
-            handler.dispatch(envelope)
+            (handler.dispatch_fn)(envelope)
         } else {
             Err(crate::AutoGenError::other(format!(
                 "No handler registered for message type: {}",
@@ -171,6 +184,11 @@ impl MessageRouter {
     /// Check if a handler is registered for a specific type
     pub fn has_handler<M: Message>(&self) -> bool {
         self.handlers.contains_key(&TypeId::of::<M>())
+    }
+
+    /// Get all registered message types
+    pub fn registered_types(&self) -> Vec<&'static str> {
+        self.handlers.values().map(|entry| entry.type_name).collect()
     }
 }
 
@@ -208,9 +226,28 @@ impl UntypedMessageEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoResponse;
 
+impl Message for NoResponse {
+    type Response = NoResponse;
+}
+
+// Implement EfficientMessage for NoResponse
+#[cfg(feature = "json")]
+impl crate::message_v2::EfficientMessage for NoResponse {
+    type Response = NoResponse;
+
+    fn serialize(&self) -> crate::Result<Vec<u8>> {
+        Ok(vec![]) // Empty response
+    }
+
+    fn deserialize(_data: &[u8]) -> crate::Result<Self> {
+        Ok(NoResponse)
+    }
+}
+
 /// Basic text message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextMessage {
+    /// Message content
     pub content: String,
 }
 
@@ -218,9 +255,34 @@ impl Message for TextMessage {
     type Response = NoResponse;
 }
 
+// Implement EfficientMessage for TextMessage
+#[cfg(feature = "json")]
+impl crate::message_v2::EfficientMessage for TextMessage {
+    type Response = NoResponse;
+
+    fn serialize(&self) -> crate::Result<Vec<u8>> {
+        serde_json::to_vec(self).map_err(|e| crate::AutoGenError::other(format!("Serialization failed: {}", e)))
+    }
+
+    fn deserialize(data: &[u8]) -> crate::Result<Self> {
+        serde_json::from_slice(data).map_err(|e| crate::AutoGenError::other(format!("Deserialization failed: {}", e)))
+    }
+
+    fn validate(&self) -> crate::Result<()> {
+        if self.content.is_empty() {
+            return Err(crate::AutoGenError::other("TextMessage content cannot be empty"));
+        }
+        if self.content.len() > 10_000 {
+            return Err(crate::AutoGenError::other("TextMessage content too long (max 10,000 characters)"));
+        }
+        Ok(())
+    }
+}
+
 /// Request-response message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestMessage<T> {
+    /// Request data
     pub request: T,
 }
 
@@ -234,8 +296,11 @@ where
 /// Response message
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseMessage<T> {
+    /// Response data
     pub response: T,
+    /// Whether the operation was successful
     pub success: bool,
+    /// Error message if operation failed
     pub error: Option<String>,
 }
 

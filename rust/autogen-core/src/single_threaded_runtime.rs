@@ -6,7 +6,7 @@
 use crate::{
     Agent, AgentId, AgentRuntime, CancellationToken, MessageContext, Result, RuntimeConfig,
     RuntimeEvent, RuntimeEventHandler, RuntimeStats, Subscription, SubscriptionRegistry, TopicId,
-    AutoGenError, AgentRegistry, MessageRouter, UntypedMessageEnvelope,
+    AutoGenError, agent_runtime::AgentRegistry,
 };
 use async_trait::async_trait;
 use std::any::Any;
@@ -132,12 +132,13 @@ impl SingleThreadedAgentRuntime {
         let (sender, receiver) = mpsc::unbounded_channel();
         
         Self {
-            agents: HashMap::new(),
+            agent_registry: AgentRegistry::new(),
             subscription_registry: SubscriptionRegistry::new(),
             config,
             stats: RuntimeStats::default(),
             is_running: false,
             event_handlers: Vec::new(),
+            performance_metrics: PerformanceMetrics::default(),
             message_sender: Some(sender),
             message_receiver: Some(receiver),
             cancellation_token: CancellationToken::new(),
@@ -175,9 +176,10 @@ impl SingleThreadedAgentRuntime {
             } => {
                 self.stats.messages_processed += 1;
                 
-                if let Some(agent) = self.agents.get_mut(&recipient) {
+                if let Some(agent_arc) = self.agent_registry.get_agent(&recipient).await {
                     let context = MessageContext::direct_message(sender.clone(), self.cancellation_token.clone());
 
+                    let mut agent = agent_arc.write().await;
                     let result = agent.on_message(message, &context).await;
 
                     if let Some(sender_channel) = response_sender {
@@ -186,9 +188,9 @@ impl SingleThreadedAgentRuntime {
                                 let _ = sender_channel.send(Ok(response));
                             }
                             Ok(None) => {
-                                let _ = sender_channel.send(Err(AutoGenError::Other {
-                                    message: "No response from agent".to_string(),
-                                }));
+                                let _ = sender_channel.send(Err(AutoGenError::other(
+                                    "No response from agent"
+                                )));
                             }
                             Err(e) => {
                                 let _ = sender_channel.send(Err(e));
@@ -201,7 +203,10 @@ impl SingleThreadedAgentRuntime {
                         }).await;
                     }
                 } else {
-                    let error = AutoGenError::AgentNotFound(recipient.to_string());
+                    let error = AutoGenError::AgentNotFound {
+                        agent_id: recipient.clone(),
+                        available_agents: Vec::new(), // TODO: Get actual agent list
+                    };
                     if let Some(sender_channel) = response_sender {
                         let _ = sender_channel.send(Err(error));
                     } else {
@@ -228,13 +233,14 @@ impl SingleThreadedAgentRuntime {
                 // a proper message cloning mechanism. For now, we'll process agents sequentially
                 // and only the first matching agent will receive the message.
                 if let Some(first_agent_id) = matching_agents.iter().next() {
-                    if let Some(agent) = self.agents.get_mut(first_agent_id) {
+                    if let Some(agent_arc) = self.agent_registry.get_agent(first_agent_id).await {
                         let context = MessageContext::topic_message(
                             sender.clone(),
                             topic_id.clone(),
                             self.cancellation_token.clone(),
                         );
 
+                        let mut agent = agent_arc.write().await;
                         if let Err(e) = agent.on_message(message, &context).await {
                             self.emit_event(RuntimeEvent::Error {
                                 message: format!("Error processing topic message: {}", e),
@@ -316,15 +322,15 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
         // TODO: Implement proper runtime handle
         // agent.bind_id_and_runtime(agent_id.clone(), runtime_handle).await?;
         
-        self.agents.insert(agent_id.clone(), agent);
-        
+        self.agent_registry.register_agent(agent_id.clone(), agent).await?;
+
         if let Some(subs) = subscriptions {
             for subscription in subs {
                 self.subscription_registry.subscribe(agent_id.clone(), subscription);
             }
         }
-        
-        self.stats.active_agents = self.agents.len();
+
+        self.stats.active_agents = self.agent_registry.agent_count().await;
         
         self.emit_event(RuntimeEvent::AgentRegistered {
             agent_id: agent_id.clone(),
@@ -340,24 +346,27 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
         agent: Box<dyn Agent>,
         subscriptions: Option<Vec<Box<dyn Subscription>>>,
     ) -> Result<()> {
-        if self.agents.contains_key(&agent_id) {
+        // Check if agent already exists
+        let agent_list = self.agent_registry.list_agents().await;
+        if agent_list.contains(&agent_id) {
             return Err(AutoGenError::Other {
                 message: format!("Agent with ID {} already exists", agent_id),
+                context: crate::error::ErrorContext::new("agent_registration"),
             });
         }
-        
+
         // TODO: Implement proper runtime handle
         // agent.bind_id_and_runtime(agent_id.clone(), runtime_handle).await?;
-        
-        self.agents.insert(agent_id.clone(), agent);
-        
+
+        self.agent_registry.register_agent(agent_id.clone(), agent).await?;
+
         if let Some(subs) = subscriptions {
             for subscription in subs {
                 self.subscription_registry.subscribe(agent_id.clone(), subscription);
             }
         }
-        
-        self.stats.active_agents = self.agents.len();
+
+        self.stats.active_agents = self.agent_registry.agent_count().await;
         
         self.emit_event(RuntimeEvent::AgentRegistered {
             agent_id: agent_id.clone(),
@@ -368,18 +377,18 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
     }
 
     async fn unregister_agent(&mut self, agent_id: &AgentId) -> Result<()> {
-        if let Some(mut agent) = self.agents.remove(agent_id) {
-            agent.close().await?;
-            self.subscription_registry.unsubscribe_all(agent_id);
-            self.stats.active_agents = self.agents.len();
-            
-            self.emit_event(RuntimeEvent::AgentUnregistered {
-                agent_id: agent_id.clone(),
-            }).await;
-            
-            Ok(())
-        } else {
-            Err(AutoGenError::AgentNotFound(agent_id.to_string()))
+        match self.agent_registry.unregister_agent(agent_id).await {
+            Ok(_) => {
+                self.subscription_registry.unsubscribe_all(agent_id);
+                self.stats.active_agents = self.agent_registry.agent_count().await;
+
+                self.emit_event(RuntimeEvent::AgentUnregistered {
+                    agent_id: agent_id.clone(),
+                }).await;
+
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -398,9 +407,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             };
             
             sender_ref.send(runtime_message).map_err(|_| {
-                AutoGenError::Runtime {
-                    message: "Failed to send message to runtime queue".to_string(),
-                }
+                AutoGenError::other("Failed to send message to runtime queue")
             })?;
             
             self.emit_event(RuntimeEvent::MessageSent {
@@ -411,9 +418,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             
             Ok(())
         } else {
-            Err(AutoGenError::Runtime {
-                message: "Runtime message sender not available".to_string(),
-            })
+            Err(AutoGenError::other("Runtime message sender not available"))
         }
     }
 
@@ -431,9 +436,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             };
             
             sender_ref.send(runtime_message).map_err(|_| {
-                AutoGenError::Runtime {
-                    message: "Failed to send message to runtime queue".to_string(),
-                }
+                AutoGenError::other("Failed to send message to runtime queue")
             })?;
             
             self.emit_event(RuntimeEvent::MessagePublished {
@@ -444,9 +447,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             
             Ok(())
         } else {
-            Err(AutoGenError::Runtime {
-                message: "Runtime message sender not available".to_string(),
-            })
+            Err(AutoGenError::other("Runtime message sender not available"))
         }
     }
 
@@ -469,9 +470,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             };
             
             sender_ref.send(runtime_message).map_err(|_| {
-                AutoGenError::Runtime {
-                    message: "Failed to send request to runtime queue".to_string(),
-                }
+                AutoGenError::other("Failed to send request to runtime queue")
             })?;
             
             self.emit_event(RuntimeEvent::RpcRequest {
@@ -481,30 +480,28 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             }).await;
             
             response_receiver.await.map_err(|_| {
-                AutoGenError::Runtime {
-                    message: "Failed to receive response".to_string(),
-                }
+                AutoGenError::other("Failed to receive response")
             })?
         } else {
-            Err(AutoGenError::Runtime {
-                message: "Runtime message sender not available".to_string(),
-            })
+            Err(AutoGenError::other("Runtime message sender not available"))
         }
     }
 
     async fn start(&mut self) -> Result<()> {
         if self.is_running {
-            return Err(AutoGenError::Runtime {
-                message: "Runtime is already running".to_string(),
-            });
+            return Err(AutoGenError::other("Runtime is already running"));
         }
         
         self.is_running = true;
         self.emit_event(RuntimeEvent::RuntimeStarted).await;
         
         // Start all agents
-        for agent in self.agents.values_mut() {
-            agent.on_start().await?;
+        let agent_ids = self.agent_registry.list_agents().await;
+        for agent_id in agent_ids {
+            if let Some(agent_arc) = self.agent_registry.get_agent(&agent_id).await {
+                let mut agent = agent_arc.write().await;
+                agent.on_start().await?;
+            }
         }
         
         // Start the message processing loop
@@ -527,8 +524,12 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
         self.cancellation_token.cancel();
         
         // Stop all agents
-        for agent in self.agents.values_mut() {
-            agent.on_stop().await?;
+        let agent_ids = self.agent_registry.list_agents().await;
+        for agent_id in agent_ids {
+            if let Some(agent_arc) = self.agent_registry.get_agent(&agent_id).await {
+                let mut agent = agent_arc.write().await;
+                agent.on_stop().await?;
+            }
         }
         
         self.is_running = false;
@@ -542,31 +543,40 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
     }
 
     fn agent_count(&self) -> usize {
-        self.agents.len()
+        // For now, return 0. In a real implementation, we would need to make this async
+        // or cache the count in the runtime
+        0
     }
 
     fn list_agents(&self) -> Vec<AgentId> {
-        self.agents.keys().cloned().collect()
+        // For now, return empty. In a real implementation, we would need to make this async
+        // or cache the list in the runtime
+        Vec::new()
     }
 
     async fn save_state(&self) -> Result<HashMap<AgentId, HashMap<String, serde_json::Value>>> {
         let mut state = HashMap::new();
-        
-        for (agent_id, agent) in &self.agents {
-            let agent_state = agent.save_state().await?;
-            state.insert(agent_id.clone(), agent_state);
+
+        let agent_ids = self.agent_registry.list_agents().await;
+        for agent_id in agent_ids {
+            if let Some(agent_arc) = self.agent_registry.get_agent(&agent_id).await {
+                let agent = agent_arc.read().await;
+                let agent_state = agent.save_state().await?;
+                state.insert(agent_id, agent_state);
+            }
         }
-        
+
         Ok(state)
     }
 
     async fn load_state(&mut self, state: HashMap<AgentId, HashMap<String, serde_json::Value>>) -> Result<()> {
         for (agent_id, agent_state) in state {
-            if let Some(agent) = self.agents.get_mut(&agent_id) {
+            if let Some(agent_arc) = self.agent_registry.get_agent(&agent_id).await {
+                let mut agent = agent_arc.write().await;
                 agent.load_state(agent_state).await?;
             }
         }
-        
+
         Ok(())
     }
 }

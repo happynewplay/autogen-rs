@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use async_trait::async_trait;
+#[cfg(feature = "runtime")]
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use crate::{CancellationToken, error::Result, tools::ToolSchema};
@@ -197,7 +198,7 @@ pub struct ModelInfo {
 }
 
 /// Validate that a ModelInfo contains all required fields
-pub fn validate_model_info(model_info: &ModelInfo) -> Result<()> {
+pub fn validate_model_info(_model_info: &ModelInfo) -> Result<()> {
     // All fields are required in the struct, so this is mainly for future extensibility
     Ok(())
 }
@@ -263,6 +264,7 @@ pub trait ChatCompletionClient: Send + Sync {
     ///
     /// # Returns
     /// A stream of string chunks ending with a CreateResult
+    #[cfg(feature = "runtime")]
     async fn create_stream(
         &self,
         messages: &[LLMMessage],

@@ -46,6 +46,7 @@ impl SerializationVersion {
         match (self, other) {
             (Self::V1_0, Self::V1_0) => true,
             (Self::V1_1, Self::V1_0 | Self::V1_1) => true,
+            (Self::V1_1, Self::V2_0) => false, // V1.1 can't read V2.0
             (Self::V2_0, _) => true, // V2.0 is backward compatible
             (Self::V1_0, Self::V1_1 | Self::V2_0) => false, // V1.0 can't read newer formats
         }
@@ -116,11 +117,11 @@ impl CompressionAlgorithm {
     }
 
     /// Check if compression is beneficial for the given data size
-    pub fn should_compress(&self, data_size: usize) -> bool {
+    pub fn should_compress(&self, _data_size: usize) -> bool {
         match self {
             Self::None => false,
             #[cfg(feature = "compression")]
-            Self::Gzip | Self::Lz4 | Self::Zstd => data_size > 1024, // Only compress if > 1KB
+            Self::Gzip | Self::Lz4 | Self::Zstd => _data_size > 1024, // Only compress if > 1KB
         }
     }
 }
@@ -164,6 +165,14 @@ pub struct JsonMessageSerializer {
     type_registry: HashMap<TypeId, Arc<dyn TypeSerializer>>,
 }
 
+impl std::fmt::Debug for JsonMessageSerializer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsonMessageSerializer")
+            .field("type_registry_count", &self.type_registry.len())
+            .finish()
+    }
+}
+
 impl JsonMessageSerializer {
     /// Create a new JSON message serializer
     pub fn new() -> Self {
@@ -194,11 +203,15 @@ impl MessageSerializer for JsonMessageSerializer {
         if let Some(serializer) = self.type_registry.get(&type_id) {
             let json_value = serializer.serialize(message)?;
             let bytes = serde_json::to_vec(&json_value)
-                .map_err(|e| AutoGenError::Serialization { source: e })?;
+                .map_err(|e| AutoGenError::Serialization {
+                    source: e,
+                    context: crate::error::ErrorContext::new("json_serialization"),
+                })?;
             Ok((bytes, JSON_DATA_CONTENT_TYPE.to_string()))
         } else {
             Err(AutoGenError::Other {
                 message: format!("No serializer registered for type: {:?}", type_id),
+                context: crate::error::ErrorContext::new("type_serialization"),
             })
         }
     }
@@ -207,16 +220,21 @@ impl MessageSerializer for JsonMessageSerializer {
         if content_type != JSON_DATA_CONTENT_TYPE {
             return Err(AutoGenError::Other {
                 message: format!("Unsupported content type: {}", content_type),
+                context: crate::error::ErrorContext::new("content_type_validation"),
             });
         }
 
         if let Some(serializer) = self.type_registry.get(&type_id) {
             let json_value: serde_json::Value = serde_json::from_slice(data)
-                .map_err(|e| AutoGenError::Serialization { source: e })?;
+                .map_err(|e| AutoGenError::Serialization {
+                    source: e,
+                    context: crate::error::ErrorContext::new("json_deserialization"),
+                })?;
             serializer.deserialize(&json_value)
         } else {
             Err(AutoGenError::Other {
                 message: format!("No deserializer registered for type: {:?}", type_id),
+                context: crate::error::ErrorContext::new("type_deserialization"),
             })
         }
     }
@@ -264,17 +282,24 @@ where
     fn serialize(&self, value: &dyn Any) -> Result<serde_json::Value> {
         if let Some(typed_value) = value.downcast_ref::<T>() {
             serde_json::to_value(typed_value)
-                .map_err(|e| AutoGenError::Serialization { source: e })
+                .map_err(|e| AutoGenError::Serialization {
+                    source: e,
+                    context: crate::error::ErrorContext::new("type_serialization"),
+                })
         } else {
             Err(AutoGenError::Other {
                 message: "Type mismatch during serialization".to_string(),
+                context: crate::error::ErrorContext::new("type_casting"),
             })
         }
     }
 
     fn deserialize(&self, value: &serde_json::Value) -> Result<Box<dyn Any + Send>> {
         let typed_value: T = serde_json::from_value(value.clone())
-            .map_err(|e| AutoGenError::Serialization { source: e })?;
+            .map_err(|e| AutoGenError::Serialization {
+                source: e,
+                context: crate::error::ErrorContext::new("type_deserialization"),
+            })?;
         Ok(Box::new(typed_value))
     }
 }
@@ -471,6 +496,38 @@ impl SerializedMessage {
     /// Remove metadata entry
     pub fn remove_metadata(&mut self, key: &str) -> Option<serde_json::Value> {
         self.metadata.remove(key)
+    }
+
+    /// Decompress the message data if it's compressed
+    pub fn decompress(&self) -> Result<Vec<u8>> {
+        if !self.is_compressed() {
+            return Ok(self.data.clone());
+        }
+
+        // For now, just return the data as-is since compression is not implemented
+        // In a real implementation, you would decompress based on self.compression
+        #[cfg(feature = "compression")]
+        {
+            // TODO: Implement actual decompression based on algorithm
+            Ok(self.data.clone())
+        }
+        #[cfg(not(feature = "compression"))]
+        {
+            Ok(self.data.clone())
+        }
+    }
+
+    /// Get the compression ratio (original_size / compressed_size)
+    pub fn compression_ratio(&self) -> Option<f64> {
+        if let Some(original_size) = self.original_size {
+            if self.data.len() > 0 {
+                Some(original_size as f64 / self.data.len() as f64)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 

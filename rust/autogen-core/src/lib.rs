@@ -46,22 +46,27 @@ pub mod agent;
 pub mod agent_id;
 pub mod topic;
 pub mod message;
+pub mod message_v2; // High-performance message system
 pub mod cancellation;
 
-// Serialization system (requires serialization features)
+// === Serialization System ===
+// Requires at least one serialization feature
 #[cfg(any(feature = "json", feature = "protobuf"))]
 pub mod serialization;
 
-// Subscription system
+// === Subscription System ===
+// Core subscription functionality (always available)
 pub mod subscription;
 
-// Agent runtime system (requires runtime feature)
+// === Runtime System ===
+// Agent runtime and execution (requires runtime feature)
 #[cfg(feature = "runtime")]
 pub mod agent_runtime;
 #[cfg(feature = "runtime")]
 pub mod single_threaded_runtime;
 
-// Core modules
+// === Core Modules ===
+// Always available core functionality
 pub mod memory;
 pub mod models;
 pub mod model_context;
@@ -78,7 +83,8 @@ pub mod utils;
 // pub mod telemetry;
 // pub mod code_executor;
 
-// Re-exports for convenience
+// === Core Re-exports ===
+// Always available core types and traits
 pub use error::{AutoGenError, Result};
 pub use agent_id::{AgentId, AgentType};
 pub use topic::{DefaultTopicId, TopicId};
@@ -89,11 +95,26 @@ pub use message::{
 };
 pub use cancellation::CancellationToken;
 pub use agent::{Agent, AgentMetadata, AgentProxy, RuntimeHandle};
-#[cfg(any(feature = "json", feature = "protobuf"))]
-pub use serialization::{MessageSerializer, JsonMessageSerializer, SerializedMessage, JSON_DATA_CONTENT_TYPE, PROTOBUF_DATA_CONTENT_TYPE};
-pub use subscription::{Subscription, DefaultSubscription, TypeSubscription, TopicSubscription, TypePrefixSubscription, SubscriptionRegistry};
+pub use subscription::{
+    Subscription, DefaultSubscription, TypeSubscription,
+    TopicSubscription, TypePrefixSubscription, SubscriptionRegistry
+};
+
+// === Serialization Re-exports ===
+#[cfg(feature = "json")]
+pub use serialization::{
+    MessageSerializer, JsonMessageSerializer, SerializedMessage, JSON_DATA_CONTENT_TYPE
+};
+#[cfg(feature = "protobuf")]
+pub use serialization::PROTOBUF_DATA_CONTENT_TYPE;
+
+// === Runtime Re-exports ===
 #[cfg(feature = "runtime")]
-pub use agent_runtime::{AgentRuntime, RuntimeConfig, RuntimeStats, RuntimeEvent, RuntimeEventHandler, LoggingEventHandler};
+pub use agent_runtime::{
+    AgentRuntime, RuntimeConfig, RuntimeStats, RuntimeEvent,
+    RuntimeEventHandler, LoggingEventHandler
+};
+#[cfg(feature = "runtime")]
 pub use single_threaded_runtime::SingleThreadedAgentRuntime;
 
 // These will be implemented in subsequent tasks

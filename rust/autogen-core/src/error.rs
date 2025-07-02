@@ -80,6 +80,7 @@ pub enum AutoGenError {
     },
 
     /// Network/HTTP errors
+    #[cfg(feature = "http")]
     #[error("Network error in {context:?}: {source}")]
     Network {
         /// Error context
@@ -142,8 +143,10 @@ pub enum AutoGenError {
     },
 
     /// Validation errors
-    #[error("Validation error: {message}")]
+    #[error("Validation error in {context:?}: {message}")]
     Validation {
+        /// Error context
+        context: ErrorContext,
         /// Error message
         message: String
     },
@@ -233,10 +236,12 @@ pub enum AutoGenError {
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
 pub struct SimpleError {
+    /// Error message
     pub message: String,
 }
 
 impl SimpleError {
+    /// Create a new simple error
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -366,13 +371,6 @@ impl AutoGenError {
         Self::Timeout { duration_ms }
     }
 
-    /// Create a generic error
-    pub fn other<S: Into<String>>(message: S) -> Self {
-        Self::Other {
-            message: message.into(),
-        }
-    }
-
     /// Check if this error is a cancellation
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled)
@@ -381,5 +379,15 @@ impl AutoGenError {
     /// Check if this error is a timeout
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout { .. })
+    }
+}
+
+#[cfg(feature = "json")]
+impl From<serde_json::Error> for AutoGenError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Serialization {
+            context: ErrorContext::new("json_serialization"),
+            source: err,
+        }
     }
 }

@@ -3,7 +3,10 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "runtime")]
 use tokio::sync::RwLock;
+#[cfg(not(feature = "runtime"))]
+use std::sync::RwLock;
 use crate::{CancellationToken, error::Result};
 use super::base_memory::{
     Memory, MemoryContent, MemoryQuery, MemoryQueryResult, UpdateContextResult,
@@ -102,7 +105,10 @@ impl ListMemory {
 
     /// Convert to configuration
     pub async fn to_config(&self) -> ListMemoryConfig {
+        #[cfg(feature = "runtime")]
         let contents = self.contents.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let contents = self.contents.read().unwrap();
         ListMemoryConfig {
             name: Some(self.name.clone()),
             memory_contents: contents.clone(),
@@ -116,12 +122,22 @@ impl ListMemory {
 
     /// Get a copy of all memory contents
     pub async fn contents(&self) -> Vec<MemoryContent> {
-        self.contents.read().await.clone()
+        #[cfg(feature = "runtime")]
+        {
+            self.contents.read().await.clone()
+        }
+        #[cfg(not(feature = "runtime"))]
+        {
+            self.contents.read().unwrap().clone()
+        }
     }
 
     /// Set the memory contents directly
     pub async fn set_contents(&self, contents: Vec<MemoryContent>) {
+        #[cfg(feature = "runtime")]
         let mut guard = self.contents.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut guard = self.contents.write().unwrap();
         *guard = contents;
     }
 }
@@ -132,7 +148,10 @@ impl Memory for ListMemory {
         &self,
         model_context: &mut dyn crate::model_context::ChatCompletionContext,
     ) -> Result<UpdateContextResult> {
+        #[cfg(feature = "runtime")]
         let contents = self.contents.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let contents = self.contents.read().unwrap();
         
         if contents.is_empty() {
             return Ok(UpdateContextResult::empty());
@@ -145,7 +164,7 @@ impl Memory for ListMemory {
                 super::base_memory::ContentType::Text(text) => text.clone(),
                 super::base_memory::ContentType::Json(json) => json.to_string(),
                 super::base_memory::ContentType::Binary(_) => "[Binary content]".to_string(),
-                super::base_memory::ContentType::Image(_) => "[Image content]".to_string(),
+                super::base_memory::ContentType::Image { data: _, format: _, dimensions: _ } => "[Image content]".to_string(),
             })
             .collect();
 
@@ -167,7 +186,10 @@ impl Memory for ListMemory {
         _cancellation_token: Option<CancellationToken>,
     ) -> Result<MemoryQueryResult> {
         // ListMemory returns all memories without any filtering
+        #[cfg(feature = "runtime")]
         let contents = self.contents.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let contents = self.contents.read().unwrap();
         Ok(MemoryQueryResult::new(contents.clone()))
     }
 
@@ -176,13 +198,19 @@ impl Memory for ListMemory {
         content: MemoryContent,
         _cancellation_token: Option<CancellationToken>,
     ) -> Result<()> {
+        #[cfg(feature = "runtime")]
         let mut contents = self.contents.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut contents = self.contents.write().unwrap();
         contents.push(content);
         Ok(())
     }
 
     async fn clear(&self) -> Result<()> {
+        #[cfg(feature = "runtime")]
         let mut contents = self.contents.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut contents = self.contents.write().unwrap();
         contents.clear();
         Ok(())
     }

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use async_trait::async_trait;
+#[cfg(feature = "runtime")]
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 use crate::{CancellationToken, error::Result};
@@ -161,6 +162,7 @@ pub trait Workbench: Send + Sync {
 }
 
 /// A workbench that supports streaming tool execution.
+#[cfg(feature = "runtime")]
 #[async_trait]
 pub trait StreamWorkbench: Workbench {
     /// Call a tool with streaming output.

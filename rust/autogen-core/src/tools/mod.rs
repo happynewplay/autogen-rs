@@ -9,12 +9,16 @@ mod workbench;
 mod static_workbench;
 
 pub use base_tool::{
-    Tool, StreamTool, BaseTool, BaseToolWithState, BaseStreamTool,
+    Tool, BaseTool, BaseToolWithState,
     ToolSchema, ParametersSchema, ToolResult, ToolCallEvent,
 };
-pub use function_tool::{FunctionTool, FunctionToolConfig};
+#[cfg(feature = "runtime")]
+pub use base_tool::{StreamTool, BaseStreamTool};
+pub use function_tool::{FunctionTool, FunctionToolConfig, AsyncToolFunction};
 pub use workbench::{
-    Workbench, StreamWorkbench, TextResultContent, ImageResultContent,
-    WorkbenchResult,
+    Workbench, TextResultContent, ImageResultContent,
+    WorkbenchResult, WorkbenchStreamItem,
 };
+#[cfg(feature = "runtime")]
+pub use workbench::StreamWorkbench;
 pub use static_workbench::{StaticWorkbench, StaticWorkbenchConfig, StaticStreamWorkbench};

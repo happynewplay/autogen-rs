@@ -6,7 +6,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(feature = "runtime")]
 use tokio::sync::Notify;
+#[cfg(feature = "runtime")]
 use tokio::time::timeout;
 
 /// Token for cooperative cancellation of async operations
@@ -21,6 +23,7 @@ pub struct CancellationToken {
 #[derive(Debug)]
 struct CancellationTokenInner {
     cancelled: AtomicBool,
+    #[cfg(feature = "runtime")]
     notify: Notify,
 }
 
@@ -38,6 +41,7 @@ impl CancellationToken {
         Self {
             inner: Arc::new(CancellationTokenInner {
                 cancelled: AtomicBool::new(false),
+                #[cfg(feature = "runtime")]
                 notify: Notify::new(),
             }),
         }
@@ -73,15 +77,16 @@ impl CancellationToken {
     /// assert!(!token.is_cancelled());
     /// # });
     /// ```
+    #[cfg(feature = "runtime")]
     pub fn with_timeout(duration: Duration) -> Self {
         let token = Self::new();
         let token_clone = token.clone();
-        
+
         tokio::spawn(async move {
             tokio::time::sleep(duration).await;
             token_clone.cancel();
         });
-        
+
         token
     }
 
@@ -115,6 +120,7 @@ impl CancellationToken {
     /// ```
     pub fn cancel(&self) {
         self.inner.cancelled.store(true, Ordering::Release);
+        #[cfg(feature = "runtime")]
         self.inner.notify.notify_waiters();
     }
 
@@ -142,6 +148,7 @@ impl CancellationToken {
     ///     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     /// }
     /// ```
+    #[cfg(feature = "runtime")]
     pub async fn wait_for_cancellation(&self) {
         if self.is_cancelled() {
             return;
@@ -197,6 +204,7 @@ impl CancellationToken {
     ///     Ok(result)
     /// }
     /// ```
+    #[cfg(feature = "runtime")]
     pub async fn run_with_cancellation<F, T>(&self, future: F) -> crate::Result<T>
     where
         F: std::future::Future<Output = T>,
@@ -215,6 +223,7 @@ impl CancellationToken {
     ///
     /// # Returns
     /// Result containing the future's output, timeout error, or cancellation error
+    #[cfg(feature = "runtime")]
     pub async fn run_with_timeout<F, T>(&self, duration: Duration, future: F) -> crate::Result<T>
     where
         F: std::future::Future<Output = T>,
@@ -248,16 +257,17 @@ impl CancellationToken {
     /// assert!(child.is_cancelled());
     /// # });
     /// ```
+    #[cfg(feature = "runtime")]
     pub fn child_token(&self) -> Self {
         let child = Self::new();
         let child_clone = child.clone();
         let parent = self.clone();
-        
+
         tokio::spawn(async move {
             parent.wait_for_cancellation().await;
             child_clone.cancel();
         });
-        
+
         child
     }
 }
@@ -268,7 +278,7 @@ impl Default for CancellationToken {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::*;
     use std::time::Duration;

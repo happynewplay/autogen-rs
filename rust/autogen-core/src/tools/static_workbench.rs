@@ -3,14 +3,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use async_trait::async_trait;
+#[cfg(feature = "runtime")]
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "runtime")]
 use tokio::sync::RwLock;
+#[cfg(not(feature = "runtime"))]
+use std::sync::RwLock;
 use crate::{CancellationToken, error::Result};
 use super::{
     base_tool::{Tool, ToolSchema},
-    workbench::{Workbench, StreamWorkbench, WorkbenchResult, WorkbenchStreamItem},
+    workbench::{Workbench, WorkbenchResult, WorkbenchStreamItem},
 };
+#[cfg(feature = "runtime")]
+use super::workbench::StreamWorkbench;
 
 /// Configuration for StaticWorkbench
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,7 +134,10 @@ impl StaticWorkbench {
     /// # Arguments
     /// * `tool` - The tool to add
     pub async fn add_tool(&self, tool: Box<dyn Tool>) {
+        #[cfg(feature = "runtime")]
         let mut tools = self.tools.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut tools = self.tools.write().unwrap();
         tools.push(tool);
     }
 
@@ -140,7 +149,10 @@ impl StaticWorkbench {
     /// # Returns
     /// True if the tool was found and removed, false otherwise
     pub async fn remove_tool(&self, name: &str) -> bool {
+        #[cfg(feature = "runtime")]
         let mut tools = self.tools.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut tools = self.tools.write().unwrap();
         if let Some(pos) = tools.iter().position(|tool| tool.name() == name) {
             tools.remove(pos);
             true
@@ -151,13 +163,23 @@ impl StaticWorkbench {
 
     /// Get the number of tools in the workbench
     pub async fn tool_count(&self) -> usize {
+        #[cfg(feature = "runtime")]
         let tools = self.tools.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let tools = self.tools.read().unwrap();
         tools.len()
     }
 
     /// Check if the workbench is started
     pub async fn is_started(&self) -> bool {
-        *self.started.read().await
+        #[cfg(feature = "runtime")]
+        {
+            *self.started.read().await
+        }
+        #[cfg(not(feature = "runtime"))]
+        {
+            *self.started.read().unwrap()
+        }
     }
 
     /// Create from configuration
@@ -168,7 +190,10 @@ impl StaticWorkbench {
 
     /// Convert to configuration
     pub async fn to_config(&self) -> StaticWorkbenchConfig {
+        #[cfg(feature = "runtime")]
         let tools = self.tools.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let tools = self.tools.read().unwrap();
         StaticWorkbenchConfig {
             tools: tools.iter().map(|tool| tool.name().to_string()).collect(),
         }
@@ -178,7 +203,10 @@ impl StaticWorkbench {
 #[async_trait]
 impl Workbench for StaticWorkbench {
     async fn list_tools(&self) -> Result<Vec<ToolSchema>> {
+        #[cfg(feature = "runtime")]
         let tools = self.tools.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let tools = self.tools.read().unwrap();
         Ok(tools.iter().map(|tool| tool.schema()).collect())
     }
 
@@ -189,12 +217,18 @@ impl Workbench for StaticWorkbench {
         cancellation_token: Option<CancellationToken>,
         call_id: Option<String>,
     ) -> Result<WorkbenchResult> {
+        #[cfg(feature = "runtime")]
         let tools = self.tools.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let tools = self.tools.read().unwrap();
         
         // Find the tool by name
         let tool = tools.iter()
             .find(|tool| tool.name() == name)
-            .ok_or_else(|| crate::error::AutoGenError::ToolNotFound(name.to_string()))?;
+            .ok_or_else(|| crate::error::AutoGenError::ToolNotFound {
+                tool_name: name.to_string(),
+                available_tools: tools.iter().map(|t| t.name().to_string()).collect(),
+            })?;
 
         // Execute the tool
         let args = arguments.cloned().unwrap_or_default();
@@ -210,13 +244,19 @@ impl Workbench for StaticWorkbench {
     }
 
     async fn start(&mut self) -> Result<()> {
+        #[cfg(feature = "runtime")]
         let mut started = self.started.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut started = self.started.write().unwrap();
         *started = true;
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
+        #[cfg(feature = "runtime")]
         let mut started = self.started.write().await;
+        #[cfg(not(feature = "runtime"))]
+        let mut started = self.started.write().unwrap();
         *started = false;
         Ok(())
     }
@@ -227,7 +267,10 @@ impl Workbench for StaticWorkbench {
     }
 
     async fn save_state(&self) -> Result<HashMap<String, serde_json::Value>> {
+        #[cfg(feature = "runtime")]
         let tools = self.tools.read().await;
+        #[cfg(not(feature = "runtime"))]
+        let tools = self.tools.read().unwrap();
         let mut tool_states = HashMap::new();
         
         for tool in tools.iter() {
@@ -251,7 +294,10 @@ impl Workbench for StaticWorkbench {
         if let Some(state_value) = state.get("workbench_state") {
             let workbench_state: StaticWorkbenchState = serde_json::from_value(state_value.clone())?;
             
+            #[cfg(feature = "runtime")]
             let tools = self.tools.read().await;
+            #[cfg(not(feature = "runtime"))]
+            let tools = self.tools.read().unwrap();
             for tool in tools.iter() {
                 if let Some(tool_state) = workbench_state.tools.get(tool.name()) {
                     tool.load_state_json(tool_state).await?;
@@ -320,6 +366,7 @@ impl Workbench for StaticStreamWorkbench {
     }
 }
 
+#[cfg(feature = "runtime")]
 #[async_trait]
 impl StreamWorkbench for StaticStreamWorkbench {
     async fn call_tool_stream(
@@ -332,7 +379,7 @@ impl StreamWorkbench for StaticStreamWorkbench {
         // For now, just call the regular tool and return the result as a stream
         // In a real implementation, this would check if the tool supports streaming
         let result = self.call_tool(name, arguments, cancellation_token, call_id).await?;
-        
+
         use futures::stream;
         let stream = stream::once(async move {
             Ok(WorkbenchStreamItem::Final(result))

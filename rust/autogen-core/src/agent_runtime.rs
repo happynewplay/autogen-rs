@@ -6,7 +6,7 @@
 //! This module is only available when the "runtime" feature is enabled.
 
 #[cfg(feature = "runtime")]
-use crate::{Agent, AgentId, Result, TopicId, Subscription, MessageRouter, UntypedMessageEnvelope};
+use crate::{Agent, AgentId, AgentMetadata, Result, TopicId, Subscription, message::MessageRouter, message::UntypedMessageEnvelope};
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
 #[cfg(feature = "runtime")]
@@ -137,10 +137,9 @@ pub trait AgentRuntime: Send + Sync {
 
 /// High-performance agent registry with optimized lookups
 #[cfg(feature = "runtime")]
-#[derive(Debug)]
 pub struct AgentRegistry {
     /// Agents indexed by ID for O(1) lookup
-    agents: Arc<RwLock<HashMap<AgentId, Arc<RwLock<dyn Agent>>>>>,
+    agents: Arc<RwLock<HashMap<AgentId, Arc<RwLock<Box<dyn Agent>>>>>>,
     /// Type-based routing for fast message dispatch
     message_router: Arc<RwLock<MessageRouter>>,
     /// Agent metadata cache
@@ -151,6 +150,7 @@ pub struct AgentRegistry {
 
 #[cfg(feature = "runtime")]
 #[derive(Debug, Default)]
+/// Performance metrics for the agent registry
 pub struct RegistryMetrics {
     /// Total number of registered agents
     pub agent_count: usize,
@@ -232,7 +232,7 @@ impl AgentRegistry {
     }
 
     /// Get an agent by ID with optimized lookup
-    pub async fn get_agent(&self, agent_id: &AgentId) -> Option<Arc<RwLock<dyn Agent>>> {
+    pub async fn get_agent(&self, agent_id: &AgentId) -> Option<Arc<RwLock<Box<dyn Agent>>>> {
         let agents = self.agents.read().await;
         agents.get(agent_id).cloned()
     }
@@ -249,10 +249,21 @@ impl AgentRegistry {
         agents.keys().cloned().collect()
     }
 
+    /// Get the number of registered agents
+    pub async fn agent_count(&self) -> usize {
+        let agents = self.agents.read().await;
+        agents.len()
+    }
+
     /// Get registry metrics
     pub async fn get_metrics(&self) -> RegistryMetrics {
         let metrics = self.metrics.read().await;
-        metrics.clone()
+        RegistryMetrics {
+            agent_count: metrics.agent_count,
+            messages_routed: metrics.messages_routed,
+            avg_routing_time_us: metrics.avg_routing_time_us,
+            cache_hit_rate: metrics.cache_hit_rate,
+        }
     }
 
     /// Route a message with performance tracking

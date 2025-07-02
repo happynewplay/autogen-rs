@@ -10,4 +10,5 @@ pub use tool_agent::{
     ToolAgent, ToolException, ToolNotFoundException, InvalidToolArgumentsException,
     ToolExecutionException,
 };
+#[cfg(feature = "runtime")]
 pub use caller_loop::tool_agent_caller_loop;

@@ -179,9 +179,10 @@ impl ToolAgent {
         let tool = self.tools.iter()
             .find(|tool| tool.name() == message.name)
             .ok_or_else(|| {
-                crate::error::AutoGenError::ToolNotFound(format!(
-                    "Tool '{}' not found", message.name
-                ))
+                crate::error::AutoGenError::ToolNotFound {
+                    tool_name: message.name.clone(),
+                    available_tools: self.tools.iter().map(|t| t.name().to_string()).collect(),
+                }
             })?;
 
         // Parse arguments
@@ -189,9 +190,11 @@ impl ToolAgent {
             HashMap::new()
         } else {
             serde_json::from_str(&message.arguments)
-                .map_err(|e| crate::error::AutoGenError::InvalidArguments(format!(
-                    "Invalid arguments for tool '{}': {}", message.name, e
-                )))?
+                .map_err(|e| crate::error::AutoGenError::InvalidArguments {
+                    operation: format!("tool execution: {}", message.name),
+                    reason: e.to_string(),
+                    expected_schema: None,
+                })?
         };
 
         // Execute the tool

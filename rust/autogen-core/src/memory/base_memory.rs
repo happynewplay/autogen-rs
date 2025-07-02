@@ -361,8 +361,8 @@ impl From<MemoryContent> for MemoryQuery {
 #[async_trait]
 pub trait Memory: Send + Sync {
     /// Get the content limits for this memory implementation
-    fn content_limits(&self) -> &ContentLimits {
-        &ContentLimits::default()
+    fn content_limits(&self) -> ContentLimits {
+        ContentLimits::default()
     }
     /// Update the provided model context using relevant memory content.
     ///
@@ -401,7 +401,7 @@ pub trait Memory: Send + Sync {
         cancellation_token: Option<CancellationToken>,
     ) -> Result<()> {
         // Validate content before adding
-        content.validate(self.content_limits())?;
+        content.validate(&self.content_limits())?;
         self.add_validated(content, cancellation_token).await
     }
 

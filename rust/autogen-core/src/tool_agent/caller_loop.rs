@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use crate::{
     agent_id::AgentId,
-    agent_runtime::AgentRuntime,
     error::Result,
     models::{
         AssistantMessage, ChatCompletionClient,
@@ -12,6 +11,8 @@ use crate::{
     tools::ToolSchema,
     CancellationToken, FunctionCall,
 };
+#[cfg(feature = "runtime")]
+use crate::agent_runtime::AgentRuntime;
 // Tool exceptions are handled inline
 
 /// Start a caller loop for a tool agent.
@@ -56,6 +57,7 @@ use crate::{
 /// # Ok(())
 /// # }
 /// ```
+#[cfg(feature = "runtime")]
 pub async fn tool_agent_caller_loop(
     runtime: &mut dyn AgentRuntime,
     tool_agent_id: AgentId,
@@ -121,17 +123,17 @@ pub async fn tool_agent_caller_loop(
                         Err(e) => {
                             // Handle different types of tool exceptions
                             let error_result = match e {
-                                crate::error::AutoGenError::ToolNotFound(msg) => {
+                                crate::error::AutoGenError::ToolNotFound { tool_name, available_tools: _ } => {
                                     FunctionExecutionResult {
-                                        content: format!("Tool not found: {}", msg),
+                                        content: format!("Tool not found: {}", tool_name),
                                         call_id: call.id.clone(),
                                         is_error: Some(true),
                                         name: call.name.clone(),
                                     }
                                 }
-                                crate::error::AutoGenError::InvalidArguments(msg) => {
+                                crate::error::AutoGenError::InvalidArguments { operation, reason, expected_schema: _ } => {
                                     FunctionExecutionResult {
-                                        content: format!("Invalid arguments: {}", msg),
+                                        content: format!("Invalid arguments for {}: {}", operation, reason),
                                         call_id: call.id.clone(),
                                         is_error: Some(true),
                                         name: call.name.clone(),
@@ -206,6 +208,7 @@ fn tool_exception_to_result(exception: &dyn std::error::Error, call_id: String, 
 }
 
 /// Helper function to handle tool execution results
+#[cfg(feature = "runtime")]
 async fn handle_tool_execution_results(
     runtime: &mut dyn AgentRuntime,
     tool_agent_id: AgentId,

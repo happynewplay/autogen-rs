@@ -16,11 +16,13 @@ readme = "README.md"
 [dependencies]
 # Core dependencies (always included)
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+
+# JSON serialization (optional)
+serde_json = { workspace = true, optional = true }
 
 # Async runtime (optional)
 tokio = { workspace = true, optional = true }
@@ -66,33 +68,46 @@ criterion = { workspace = true }
 [features]
 default = ["runtime", "json", "validation"]
 
-# Core features
-runtime = ["tokio", "tokio-util", "futures"]
+# === Core Features ===
+# Essential runtime functionality
+runtime = ["tokio", "tokio-util", "futures", "anyhow"]
+# JSON serialization support
 json = ["serde_json"]
+# Input validation and schema checking
 validation = ["jsonschema", "regex"]
 
-# Serialization formats
+# === Serialization Features ===
+# Protocol Buffer support
 protobuf = ["prost", "prost-types"]
+# All serialization formats
 all-serialization = ["json", "protobuf"]
 
-# Networking and HTTP
+# === Networking Features ===
+# HTTP client functionality
 http = ["reqwest", "url", "bytes"]
-networking = ["http"]
+# Complete networking stack
+networking = ["http", "runtime"]
 
-# Telemetry and observability
-tracing = ["dep:tracing"]
-telemetry = ["tracing", "opentelemetry", "opentelemetry-semantic-conventions"]
+# === Observability Features ===
+# Basic tracing support
+tracing = ["dep:tracing", "runtime"]
+# Full telemetry with OpenTelemetry
+telemetry = ["tracing", "opentelemetry", "opentelemetry-semantic-conventions", "runtime"]
 
-# Image processing
+# === Content Processing Features ===
+# Image processing capabilities
 images = ["image"]
 
-# Configuration management
+# === Configuration Features ===
+# Configuration file support
 config-support = ["config", "toml"]
 
-# Development and testing
-testing = ["anyhow", "dashmap"]
+# === Development Features ===
+# Testing utilities and helpers
+testing = ["anyhow", "dashmap", "runtime"]
 
-# Convenience feature combinations
+# === Convenience Feature Combinations ===
+# Complete feature set for production use
 full = [
     "runtime",
     "all-serialization",
@@ -100,10 +115,34 @@ full = [
     "telemetry",
     "images",
     "config-support",
-    "validation"
+    "validation",
+    "testing"
 ]
 
-# Minimal feature set for embedded or constrained environments
+# Minimal feature set for embedded environments
 minimal = ["json"]
 
+# Standard feature set for most applications
+standard = ["runtime", "json", "validation", "http"]
 
+# Server-oriented feature set
+server = ["runtime", "all-serialization", "networking", "telemetry", "validation"]
+
+# Client-oriented feature set
+client = ["runtime", "json", "http", "validation"]
+
+[[example]]
+name = "basic_tool_usage"
+required-features = ["json", "runtime"]
+
+[[example]]
+name = "performance_optimization"
+required-features = ["json", "runtime"]
+
+[[example]]
+name = "error_handling"
+required-features = ["runtime"]
+
+[[example]]
+name = "advanced_patterns"
+required-features = ["json", "runtime"]
