@@ -6,7 +6,6 @@
 use autogen_core::*;
 use autogen_core::tools::*;
 use autogen_core::memory::*;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -357,7 +356,7 @@ async fn error_recovery_example() -> Result<()> {
 async fn memory_integration_example() -> Result<()> {
     println!("\n=== Memory Integration Example ===");
 
-    let memory: Arc<dyn Memory> = Arc::new(ListMemory::new());
+    let memory: Arc<dyn Memory> = Arc::new(ListMemory::new(Some("weather_memory".to_string())));
 
     // Create weather agent with memory
     let weather_agent = WeatherAgent::new("memory_test", memory.clone())?;
@@ -390,7 +389,7 @@ async fn memory_integration_example() -> Result<()> {
 
     // Query memory for conversation history
     println!("\nQuerying memory for conversation history:");
-    let results = memory.query("conversation", None).await?;
+    let results = memory.query("conversation".into(), None).await?;
     println!("Found {} conversation entries", results.results.len());
 
     for (i, result) in results.results.iter().enumerate() {

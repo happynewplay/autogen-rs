@@ -3,7 +3,6 @@
 //! This example demonstrates the core concepts and basic usage patterns.
 
 use autogen_core::*;
-use std::collections::HashMap;
 
 /// A simple calculator agent that can perform basic arithmetic
 #[derive(Debug)]
@@ -145,7 +144,7 @@ async fn memory_example() -> Result<()> {
     println!("\n=== Memory Example ===");
 
     // Create a memory instance
-    let memory = ListMemory::new();
+    let memory = ListMemory::new(Some("example_memory".to_string()));
 
     // Add some content
     let content1 = MemoryContent::text("The user prefers concise responses");
@@ -161,7 +160,7 @@ async fn memory_example() -> Result<()> {
     memory.add(content2, None).await?;
 
     // Query the memory
-    let results = memory.query("user preferences", None).await?;
+    let results = memory.query("user preferences".into(), None).await?;
     println!("Memory query results: {} items", results.results.len());
 
     for (i, result) in results.results.iter().enumerate() {

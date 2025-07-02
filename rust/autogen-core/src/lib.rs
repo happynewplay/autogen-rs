@@ -94,7 +94,7 @@ pub use message::{
     RequestMessage, ResponseMessage, NoResponse
 };
 pub use cancellation::CancellationToken;
-pub use agent::{Agent, AgentMetadata, AgentProxy, RuntimeHandle};
+pub use agent::{Agent, AgentMetadata, AgentProxy, RuntimeHandle, TypedAgent, TypedAgentAdapter};
 pub use subscription::{
     Subscription, DefaultSubscription, TypeSubscription,
     TopicSubscription, TypePrefixSubscription, SubscriptionRegistry

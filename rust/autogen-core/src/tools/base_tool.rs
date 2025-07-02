@@ -50,6 +50,7 @@ impl ToolArgs for NoArgs {
 /// Simple text result for tools
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextResult {
+    /// The text content of the result
     pub text: String,
 }
 

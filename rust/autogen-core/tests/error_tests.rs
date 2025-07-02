@@ -224,16 +224,22 @@ async fn test_cancellation_scenarios() {
     // Test child token cancellation
     let parent = CancellationToken::new();
     let child = parent.child_token();
-    
+
     parent.cancel();
+
+    // Give the child token a moment to be notified
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert!(child.is_cancelled());
-    
+
     // Test multiple child tokens
     let parent = CancellationToken::new();
     let child1 = parent.child_token();
     let child2 = parent.child_token();
-    
+
     parent.cancel();
+
+    // Give the child tokens a moment to be notified
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert!(child1.is_cancelled());
     assert!(child2.is_cancelled());
 }

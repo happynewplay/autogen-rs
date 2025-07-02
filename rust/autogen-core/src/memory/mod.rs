@@ -9,6 +9,6 @@ mod list_memory;
 
 pub use base_memory::{
     Memory, MemoryContent, MemoryMimeType, MemoryQueryResult, UpdateContextResult,
-    ContentType,
+    ContentType, ContentLimits,
 };
 pub use list_memory::{ListMemory, ListMemoryConfig};

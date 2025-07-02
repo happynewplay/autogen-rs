@@ -50,12 +50,7 @@ pub enum JsonExtractionError {
 /// assert_eq!(result[0]["name"], "test");
 ///
 /// // Extract from markdown code block
-/// let markdown = r#"
-/// Here's some JSON:
-/// ```json
-/// {"name": "test", "value": 42}
-/// ```
-/// "#;
+/// let markdown = "Here's some JSON:\n```json\n{\"name\": \"test\", \"value\": 42}\n```\n";
 /// let result = extract_json_from_str(markdown).unwrap();
 /// assert_eq!(result.len(), 1);
 /// assert_eq!(result[0]["name"], "test");

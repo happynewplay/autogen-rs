@@ -44,7 +44,7 @@ impl Default for ListMemoryConfig {
 /// # Example
 ///
 /// ```rust
-/// use autogen_core::memory::{ListMemory, MemoryContent};
+/// use autogen_core::memory::{ListMemory, MemoryContent, Memory};
 /// use autogen_core::model_context::UnboundedChatCompletionContext;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -182,7 +182,7 @@ impl Memory for ListMemory {
 
     async fn query(
         &self,
-        _query: impl Into<MemoryQuery> + Send,
+        _query: MemoryQuery,
         _cancellation_token: Option<CancellationToken>,
     ) -> Result<MemoryQueryResult> {
         // ListMemory returns all memories without any filtering

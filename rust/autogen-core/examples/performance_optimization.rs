@@ -85,7 +85,7 @@ async fn memory_optimization_demo() -> Result<()> {
     let mut router = EfficientMessageRouter::new();
     
     // Register handlers efficiently
-    router.register_handler::<TextMessage, _>(|_msg, _ctx| Ok(None))?;
+    router.register_handler::<TextMessage>()?;
     
     let token = CancellationToken::new();
     let context = MessageContext::direct_message(None, token);

@@ -201,8 +201,11 @@ async fn test_cancellation_token() {
     let parent = CancellationToken::new();
     let child = parent.child_token();
     assert!(!child.is_cancelled());
-    
+
     parent.cancel();
+
+    // Give the child token a moment to be notified
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     assert!(child.is_cancelled());
 }
 

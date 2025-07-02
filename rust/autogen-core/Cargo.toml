@@ -97,6 +97,8 @@ telemetry = ["tracing", "opentelemetry", "opentelemetry-semantic-conventions", "
 # === Content Processing Features ===
 # Image processing capabilities
 images = ["image"]
+# Compression support
+compression = []
 
 # === Configuration Features ===
 # Configuration file support

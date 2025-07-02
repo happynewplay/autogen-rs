@@ -11,6 +11,7 @@ mod static_workbench;
 pub use base_tool::{
     Tool, BaseTool, BaseToolWithState,
     ToolSchema, ParametersSchema, ToolResult, ToolCallEvent,
+    ToolArgs, ToolReturn, NoArgs, TypedTool, TextResult,
 };
 #[cfg(feature = "runtime")]
 pub use base_tool::{StreamTool, BaseStreamTool};

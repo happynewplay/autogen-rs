@@ -40,7 +40,7 @@ pub type AsyncToolFunction = Box<
 /// # Example
 ///
 /// ```rust
-/// use autogen_core::tools::{FunctionTool, ParametersSchema, ToolSchema};
+/// use autogen_core::tools::{FunctionTool, ParametersSchema, ToolSchema, Tool};
 /// use std::collections::HashMap;
 /// use serde_json::json;
 ///

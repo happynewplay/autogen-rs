@@ -63,7 +63,7 @@ impl Default for StaticWorkbenchState {
 /// # Example
 ///
 /// ```rust
-/// use autogen_core::tools::{StaticWorkbench, FunctionTool, Workbench, ParametersSchema};
+/// use autogen_core::tools::{StaticWorkbench, FunctionTool, Workbench, ParametersSchema, Tool};
 /// use std::collections::HashMap;
 /// use serde_json::json;
 ///

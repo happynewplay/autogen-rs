@@ -359,7 +359,7 @@ impl From<MemoryContent> for MemoryQuery {
 /// It is also a memory implementation's responsibility to update the model context
 /// with relevant memory content based on the current model context and querying the memory store.
 #[async_trait]
-pub trait Memory: Send + Sync {
+pub trait Memory: Send + Sync + std::fmt::Debug {
     /// Get the content limits for this memory implementation
     fn content_limits(&self) -> ContentLimits {
         ContentLimits::default()
@@ -386,7 +386,7 @@ pub trait Memory: Send + Sync {
     /// MemoryQueryResult containing memory entries
     async fn query(
         &self,
-        query: impl Into<MemoryQuery> + Send,
+        query: MemoryQuery,
         cancellation_token: Option<CancellationToken>,
     ) -> Result<MemoryQueryResult>;
 

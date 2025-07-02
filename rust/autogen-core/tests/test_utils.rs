@@ -188,7 +188,7 @@ where
 /// Test helper for running concurrent operations
 pub async fn run_concurrent_operations<F, Fut, T>(
     operations: Vec<F>,
-) -> Vec<Result<T, tokio::task::JoinError>>
+) -> Vec<std::result::Result<T, tokio::task::JoinError>>
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = T> + Send + 'static,
@@ -265,10 +265,10 @@ pub async fn stress_test_operation<F, Fut, T>(
     operation: F,
     iterations: usize,
     concurrency: usize,
-) -> Vec<Result<T, Box<dyn std::error::Error + Send + Sync>>>
+) -> Vec<std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>>
 where
     F: Fn() -> Fut + Send + Sync + 'static,
-    Fut: std::future::Future<Output = Result<T, Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
     T: Send + 'static,
 {
     let operation = Arc::new(operation);

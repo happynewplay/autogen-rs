@@ -70,7 +70,7 @@ pub struct ToolExecutionException {
 ///
 /// ```rust
 /// use autogen_core::tool_agent::ToolAgent;
-/// use autogen_core::tools::{FunctionTool, ParametersSchema};
+/// use autogen_core::tools::{FunctionTool, ParametersSchema, Tool};
 /// use autogen_core::FunctionCall;
 /// use std::collections::HashMap;
 /// use serde_json::json;
