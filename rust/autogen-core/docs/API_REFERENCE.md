@@ -6,57 +6,58 @@ This document provides a comprehensive reference for the AutoGen Core Rust API.
 
 ### Agent Traits
 
-#### `TypedAgent<M>`
+#### `Agent`
 
-The primary trait for implementing type-safe agents.
+The unified trait for implementing type-safe agents using `TypeSafeMessage`.
 
 ```rust
 #[async_trait]
-pub trait TypedAgent<M: Message>: Send + Sync + Debug {
+pub trait Agent: Send + Sync {
     fn id(&self) -> &AgentId;
-    
+
     async fn handle_message(
         &mut self,
-        message: M,
+        message: TypeSafeMessage,
         context: &MessageContext,
-    ) -> Result<Option<M::Response>>;
-    
+    ) -> Result<Option<TypeSafeMessage>>;
+
     fn metadata(&self) -> AgentMetadata {
         AgentMetadata::default()
+    }
+
+    async fn on_start(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn on_stop(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn save_state(&self) -> Result<HashMap<String, serde_json::Value>> {
+        Ok(HashMap::new())
+    }
+
+    async fn load_state(&mut self, _state: HashMap<String, serde_json::Value>) -> Result<()> {
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
     }
 }
 ```
 
-**Type Parameters:**
-- `M`: The message type this agent handles
-
 **Required Methods:**
 - `id()`: Returns the agent's unique identifier
-- `handle_message()`: Processes incoming messages
+- `handle_message()`: Processes incoming messages using `TypeSafeMessage`
 
 **Optional Methods:**
 - `metadata()`: Returns agent metadata
-
-#### `Agent`
-
-Legacy trait for backward compatibility.
-
-```rust
-#[async_trait]
-pub trait Agent: Send + Sync + Debug {
-    fn id(&self) -> &AgentId;
-    
-    async fn on_message(
-        &mut self,
-        message: Box<dyn Any + Send>,
-        ctx: &MessageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>>;
-    
-    async fn on_start(&mut self) -> Result<()> { Ok(()) }
-    async fn on_stop(&mut self) -> Result<()> { Ok(()) }
-    
-    fn metadata(&self) -> AgentMetadata { AgentMetadata::default() }
-}
+- `on_start()`: Called when agent starts
+- `on_stop()`: Called when agent stops
+- `save_state()`: Save agent state for persistence
+- `load_state()`: Load agent state from persistence
+- `close()`: Cleanup when agent shuts down
 ```
 
 ### Message Traits

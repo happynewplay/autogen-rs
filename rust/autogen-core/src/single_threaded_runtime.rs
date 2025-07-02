@@ -9,7 +9,7 @@ use crate::{
     AutoGenError, agent_runtime::AgentRegistry,
 };
 use async_trait::async_trait;
-use std::any::Any;
+
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -71,15 +71,15 @@ pub struct PerformanceMetrics {
 enum RuntimeMessage {
     /// Direct message to a specific agent
     DirectMessage {
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         recipient: AgentId,
         sender: Option<AgentId>,
-        response_sender: Option<tokio::sync::oneshot::Sender<Result<Box<dyn Any + Send>>>>,
+        response_sender: Option<tokio::sync::oneshot::Sender<Result<crate::TypeSafeMessage>>>,
     },
-    
+
     /// Topic-based message
     TopicMessage {
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         topic_id: TopicId,
         sender: Option<AgentId>,
     },
@@ -180,7 +180,7 @@ impl SingleThreadedAgentRuntime {
                     let context = MessageContext::direct_message(sender.clone(), self.cancellation_token.clone());
 
                     let mut agent = agent_arc.write().await;
-                    let result = agent.on_message(message, &context).await;
+                    let result = agent.handle_message(message, &context).await;
 
                     if let Some(sender_channel) = response_sender {
                         match result {
@@ -203,10 +203,9 @@ impl SingleThreadedAgentRuntime {
                         }).await;
                     }
                 } else {
-                    let error = AutoGenError::AgentNotFound {
-                        agent_id: recipient.clone(),
-                        available_agents: Vec::new(), // TODO: Get actual agent list
-                    };
+                    let error = AutoGenError::Agent(crate::error::AgentError::NotFound {
+                        agent_id: recipient.to_string(),
+                    });
                     if let Some(sender_channel) = response_sender {
                         let _ = sender_channel.send(Err(error));
                     } else {
@@ -225,7 +224,7 @@ impl SingleThreadedAgentRuntime {
             } => {
                 self.stats.messages_published += 1;
 
-                let message_type_id = message.as_ref().type_id();
+                let message_type_id = std::any::TypeId::of::<crate::TypeSafeMessage>();
                 let matching_agents = self.subscription_registry.find_matching_agents(&topic_id, message_type_id);
 
                 // For topic messages, we need to handle the fact that we can't clone arbitrary messages
@@ -241,7 +240,7 @@ impl SingleThreadedAgentRuntime {
                         );
 
                         let mut agent = agent_arc.write().await;
-                        if let Err(e) = agent.on_message(message, &context).await {
+                        if let Err(e) = agent.handle_message(message, &context).await {
                             self.emit_event(RuntimeEvent::Error {
                                 message: format!("Error processing topic message: {}", e),
                                 agent_id: Some(first_agent_id.clone()),
@@ -349,10 +348,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
         // Check if agent already exists
         let agent_list = self.agent_registry.list_agents().await;
         if agent_list.contains(&agent_id) {
-            return Err(AutoGenError::Other {
-                message: format!("Agent with ID {} already exists", agent_id),
-                context: crate::error::ErrorContext::new("agent_registration"),
-            });
+            return Err(AutoGenError::other(format!("Agent with ID {} already exists", agent_id)));
         }
 
         // TODO: Implement proper runtime handle
@@ -394,7 +390,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
 
     async fn send_message(
         &mut self,
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         recipient: AgentId,
         sender: Option<AgentId>,
     ) -> Result<()> {
@@ -424,7 +420,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
 
     async fn publish_message(
         &mut self,
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         topic_id: TopicId,
         sender: Option<AgentId>,
     ) -> Result<()> {
@@ -453,10 +449,10 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
 
     async fn send_request(
         &mut self,
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         recipient: AgentId,
         sender: Option<AgentId>,
-    ) -> Result<Box<dyn Any + Send>> {
+    ) -> Result<crate::TypeSafeMessage> {
         self.stats.rpc_requests_processed += 1;
         
         if let Some(sender_ref) = &self.message_sender {

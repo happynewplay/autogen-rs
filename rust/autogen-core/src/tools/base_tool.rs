@@ -466,17 +466,15 @@ impl<Args: ToolArgs, Return: ToolReturn, T: TypedTool<Args, Return>> Tool for Ty
         // Try to deserialize the arguments
         let typed_args: Args = if let Some(args_value) = args.get("args") {
             serde_json::from_value(args_value.clone())
-                .map_err(|e| crate::AutoGenError::invalid_arguments(
-                    format!("tool_{}", self.name()),
-                    format!("Failed to deserialize arguments: {}", e),
-                    Some(serde_json::to_string(&Args::schema()).unwrap_or_default())
-                ))?
+                .map_err(|e| crate::AutoGenError::Validation(crate::error::ValidationError::InvalidFieldValue {
+                    field: "args".to_string(),
+                    value: format!("{:?}", args_value),
+                    reason: format!("Failed to deserialize arguments: {}", e),
+                }))?
         } else {
-            return Err(crate::AutoGenError::invalid_arguments(
-                format!("tool_{}", self.name()),
-                "Missing 'args' field in arguments",
-                Some(serde_json::to_string(&Args::schema()).unwrap_or_default())
-            ));
+            return Err(crate::AutoGenError::Validation(crate::error::ValidationError::RequiredFieldMissing {
+                field: "args".to_string(),
+            }));
         };
 
         // Validate arguments
@@ -487,12 +485,8 @@ impl<Args: ToolArgs, Return: ToolReturn, T: TypedTool<Args, Return>> Tool for Ty
 
         // Serialize the result
         serde_json::to_value(result)
-            .map_err(|e| crate::AutoGenError::tool(
-                crate::error::ErrorContext::new("tool_execution")
-                    .with_detail("tool_name", self.name())
-                    .with_detail("operation", "serialize_result"),
-                format!("Failed to serialize tool result: {}", e),
-                Some(self.name().to_string())
-            ))
+            .map_err(|e| crate::AutoGenError::Serialization(crate::error::SerializationError::JsonSerialization {
+                details: format!("Failed to serialize tool result for '{}': {}", self.name(), e),
+            }))
     }
 }

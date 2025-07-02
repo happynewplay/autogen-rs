@@ -34,6 +34,127 @@ pub trait Message: Send + Sync + Debug + 'static {
     }
 }
 
+/// Type-safe message enum that eliminates the need for Box<dyn Any>
+///
+/// This enum contains all possible message types in the system, providing
+/// compile-time type safety while maintaining runtime flexibility.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TypeSafeMessage {
+    /// Simple text message
+    Text(TextMessage),
+    /// Request-response message
+    Request(RequestMessage<serde_json::Value>),
+    /// Response message
+    Response(ResponseMessage<serde_json::Value>),
+    /// Function call message
+    FunctionCall(FunctionCall),
+    /// No response marker
+    NoResponse(NoResponse),
+    /// Custom JSON message for extensibility
+    Custom {
+        /// Message type identifier
+        message_type: String,
+        /// JSON payload
+        payload: serde_json::Value,
+    },
+}
+
+impl TypeSafeMessage {
+    /// Get the message type name
+    pub fn message_type(&self) -> &str {
+        match self {
+            TypeSafeMessage::Text(_) => "TextMessage",
+            TypeSafeMessage::Request(_) => "RequestMessage",
+            TypeSafeMessage::Response(_) => "ResponseMessage",
+            TypeSafeMessage::FunctionCall(_) => "FunctionCall",
+            TypeSafeMessage::NoResponse(_) => "NoResponse",
+            TypeSafeMessage::Custom { message_type, .. } => message_type,
+        }
+    }
+
+    /// Validate the message content
+    pub fn validate(&self) -> crate::Result<()> {
+        match self {
+            TypeSafeMessage::Text(msg) => msg.validate(),
+            TypeSafeMessage::Request(_) => Ok(()),
+            TypeSafeMessage::Response(_) => Ok(()),
+            TypeSafeMessage::FunctionCall(_) => Ok(()),
+            TypeSafeMessage::NoResponse(_) => Ok(()),
+            TypeSafeMessage::Custom { .. } => Ok(()),
+        }
+    }
+
+    /// Create a text message
+    pub fn text<S: Into<String>>(content: S) -> Self {
+        TypeSafeMessage::Text(TextMessage {
+            content: content.into(),
+        })
+    }
+
+    /// Create a function call message
+    pub fn function_call<S: Into<String>>(id: S, name: S, arguments: S) -> Self {
+        TypeSafeMessage::FunctionCall(FunctionCall::new(id, name, arguments))
+    }
+
+    /// Create a custom message
+    pub fn custom<S: Into<String>>(message_type: S, payload: serde_json::Value) -> Self {
+        TypeSafeMessage::Custom {
+            message_type: message_type.into(),
+            payload,
+        }
+    }
+}
+
+/// Type-safe message envelope that eliminates Box<dyn Any>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeSafeMessageEnvelope {
+    /// The actual message payload
+    pub message: TypeSafeMessage,
+    /// Message context
+    pub context: MessageContext,
+}
+
+impl TypeSafeMessageEnvelope {
+    /// Create a new type-safe message envelope
+    pub fn new(message: TypeSafeMessage, context: MessageContext) -> Self {
+        Self { message, context }
+    }
+
+    /// Create an envelope with a text message
+    pub fn text<S: Into<String>>(content: S, context: MessageContext) -> Self {
+        Self::new(TypeSafeMessage::text(content), context)
+    }
+
+    /// Create an envelope with a function call message
+    pub fn function_call<S: Into<String>>(
+        id: S,
+        name: S,
+        arguments: S,
+        context: MessageContext,
+    ) -> Self {
+        Self::new(TypeSafeMessage::function_call(id, name, arguments), context)
+    }
+
+    /// Create an envelope with a custom message
+    pub fn custom<S: Into<String>>(
+        message_type: S,
+        payload: serde_json::Value,
+        context: MessageContext,
+    ) -> Self {
+        Self::new(TypeSafeMessage::custom(message_type, payload), context)
+    }
+
+    /// Get the message type name
+    pub fn message_type(&self) -> &str {
+        self.message.message_type()
+    }
+
+    /// Validate the message
+    pub fn validate(&self) -> crate::Result<()> {
+        self.message.validate()
+    }
+}
+
 /// A typed message envelope that preserves type information
 #[derive(Debug)]
 pub struct TypedMessageEnvelope<M: Message> {
@@ -71,6 +192,144 @@ pub struct UntypedMessageEnvelope {
     pub message_type: &'static str,
     /// TypeId for safe downcasting
     pub type_id: TypeId,
+}
+
+/// Type-safe message router that eliminates Box<dyn Any>
+///
+/// Uses pattern matching on the TypeSafeMessage enum for efficient dispatch
+/// without runtime type checking or unsafe downcasting.
+#[derive(Debug, Default)]
+pub struct TypeSafeMessageRouter {
+    /// Handlers for different message types
+    handlers: MessageHandlers,
+}
+
+/// Collection of message handlers organized by type
+#[derive(Debug, Default)]
+pub struct MessageHandlers {
+    /// Handler for text messages
+    pub text_handler: Option<fn(&TextMessage, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>>,
+    /// Handler for request messages
+    pub request_handler: Option<fn(&RequestMessage<serde_json::Value>, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>>,
+    /// Handler for response messages
+    pub response_handler: Option<fn(&ResponseMessage<serde_json::Value>, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>>,
+    /// Handler for function call messages
+    pub function_call_handler: Option<fn(&FunctionCall, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>>,
+    /// Handler for custom messages
+    pub custom_handler: Option<fn(&str, &serde_json::Value, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>>,
+}
+
+impl TypeSafeMessageRouter {
+    /// Create a new type-safe message router
+    pub fn new() -> Self {
+        Self {
+            handlers: MessageHandlers::default(),
+        }
+    }
+
+    /// Register a handler for text messages
+    pub fn register_text_handler(
+        &mut self,
+        handler: fn(&TextMessage, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>,
+    ) {
+        self.handlers.text_handler = Some(handler);
+    }
+
+    /// Register a handler for request messages
+    pub fn register_request_handler(
+        &mut self,
+        handler: fn(&RequestMessage<serde_json::Value>, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>,
+    ) {
+        self.handlers.request_handler = Some(handler);
+    }
+
+    /// Register a handler for response messages
+    pub fn register_response_handler(
+        &mut self,
+        handler: fn(&ResponseMessage<serde_json::Value>, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>,
+    ) {
+        self.handlers.response_handler = Some(handler);
+    }
+
+    /// Register a handler for function call messages
+    pub fn register_function_call_handler(
+        &mut self,
+        handler: fn(&FunctionCall, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>,
+    ) {
+        self.handlers.function_call_handler = Some(handler);
+    }
+
+    /// Register a handler for custom messages
+    pub fn register_custom_handler(
+        &mut self,
+        handler: fn(&str, &serde_json::Value, &MessageContext) -> crate::Result<Option<TypeSafeMessage>>,
+    ) {
+        self.handlers.custom_handler = Some(handler);
+    }
+
+    /// Route a message to the appropriate handler using pattern matching
+    pub fn route(&self, envelope: TypeSafeMessageEnvelope) -> crate::Result<Option<TypeSafeMessageEnvelope>> {
+        let response_message = match &envelope.message {
+            TypeSafeMessage::Text(msg) => {
+                if let Some(handler) = self.handlers.text_handler {
+                    handler(msg, &envelope.context)?
+                } else {
+                    return Err(crate::AutoGenError::other("No handler registered for TextMessage"));
+                }
+            }
+            TypeSafeMessage::Request(msg) => {
+                if let Some(handler) = self.handlers.request_handler {
+                    handler(msg, &envelope.context)?
+                } else {
+                    return Err(crate::AutoGenError::other("No handler registered for RequestMessage"));
+                }
+            }
+            TypeSafeMessage::Response(msg) => {
+                if let Some(handler) = self.handlers.response_handler {
+                    handler(msg, &envelope.context)?
+                } else {
+                    return Err(crate::AutoGenError::other("No handler registered for ResponseMessage"));
+                }
+            }
+            TypeSafeMessage::FunctionCall(msg) => {
+                if let Some(handler) = self.handlers.function_call_handler {
+                    handler(msg, &envelope.context)?
+                } else {
+                    return Err(crate::AutoGenError::other("No handler registered for FunctionCall"));
+                }
+            }
+            TypeSafeMessage::Custom { message_type, payload } => {
+                if let Some(handler) = self.handlers.custom_handler {
+                    handler(message_type, payload, &envelope.context)?
+                } else {
+                    return Err(crate::AutoGenError::other("No handler registered for custom messages"));
+                }
+            }
+            TypeSafeMessage::NoResponse(_) => None,
+        };
+
+        Ok(response_message.map(|msg| TypeSafeMessageEnvelope::new(msg, envelope.context)))
+    }
+
+    /// Check if any handlers are registered
+    pub fn has_handlers(&self) -> bool {
+        self.handlers.text_handler.is_some()
+            || self.handlers.request_handler.is_some()
+            || self.handlers.response_handler.is_some()
+            || self.handlers.function_call_handler.is_some()
+            || self.handlers.custom_handler.is_some()
+    }
+
+    /// Get the number of registered handlers
+    pub fn handler_count(&self) -> usize {
+        let mut count = 0;
+        if self.handlers.text_handler.is_some() { count += 1; }
+        if self.handlers.request_handler.is_some() { count += 1; }
+        if self.handlers.response_handler.is_some() { count += 1; }
+        if self.handlers.function_call_handler.is_some() { count += 1; }
+        if self.handlers.custom_handler.is_some() { count += 1; }
+        count
+    }
 }
 
 /// Simplified high-performance message router
@@ -223,7 +482,7 @@ impl UntypedMessageEnvelope {
 }
 
 /// Unit type for messages that don't expect a response
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoResponse;
 
 impl Message for NoResponse {

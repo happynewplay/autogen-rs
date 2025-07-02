@@ -225,10 +225,11 @@ impl Workbench for StaticWorkbench {
         // Find the tool by name
         let tool = tools.iter()
             .find(|tool| tool.name() == name)
-            .ok_or_else(|| crate::error::AutoGenError::ToolNotFound {
-                tool_name: name.to_string(),
-                available_tools: tools.iter().map(|t| t.name().to_string()).collect(),
-            })?;
+            .ok_or_else(|| crate::error::AutoGenError::other(format!(
+                "Tool '{}' not found. Available tools: {:?}",
+                name,
+                tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>()
+            )))?;
 
         // Execute the tool
         let args = arguments.cloned().unwrap_or_default();

@@ -36,8 +36,8 @@ tokio = { version = "1.0", features = ["full"] }
 
 ```rust
 use autogen_core::{
-    TypedAgent, AgentId, TextMessage, MessageContext,
-    NoResponse, Result, CancellationToken
+    Agent, AgentId, TypeSafeMessage, TextMessage, MessageContext,
+    Result, CancellationToken
 };
 
 #[derive(Debug)]
@@ -54,18 +54,25 @@ impl EchoAgent {
 }
 
 #[async_trait::async_trait]
-impl TypedAgent<TextMessage> for EchoAgent {
+impl Agent for EchoAgent {
     fn id(&self) -> &AgentId {
         &self.id
     }
 
     async fn handle_message(
         &mut self,
-        message: TextMessage,
+        message: TypeSafeMessage,
         _ctx: &MessageContext,
-    ) -> Result<Option<NoResponse>> {
-        println!("Echo: {}", message.content);
-        Ok(Some(NoResponse))
+    ) -> Result<Option<TypeSafeMessage>> {
+        match message {
+            TypeSafeMessage::Text(text_msg) => {
+                println!("Echo: {}", text_msg.content);
+                Ok(Some(TypeSafeMessage::Text(TextMessage {
+                    content: format!("Echo: {}", text_msg.content),
+                })))
+            }
+            _ => Ok(None), // Don't handle other message types
+        }
     }
 }
 

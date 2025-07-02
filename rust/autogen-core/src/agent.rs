@@ -1,55 +1,18 @@
 //! Core agent traits and types
 //!
-//! This module defines the fundamental `Agent` trait and related types
-//! that form the foundation of the AutoGen agent system, following the
-//! Python autogen-core design.
+//! This module defines the unified `Agent` trait that provides type safety
+//! while maintaining flexibility for the AutoGen agent system.
 
-use crate::{AgentId, MessageContext, Result, TopicId, Message};
+use crate::{AgentId, MessageContext, Result, TypeSafeMessage};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::any::Any;
 use std::collections::HashMap;
 
-/// Type-safe agent trait for handling specific message types
+/// Unified Agent trait that provides type safety with flexibility
 ///
-/// This trait provides compile-time type safety for message handling.
-/// Agents implementing this trait can only handle messages of type M.
-#[async_trait]
-pub trait TypedAgent<M: Message>: Send + Sync {
-    /// Get the unique identifier for this agent
-    fn id(&self) -> &AgentId;
-
-    /// Handle a typed message
-    ///
-    /// # Arguments
-    /// * `message` - The typed message to handle
-    /// * `context` - Context information about the message
-    ///
-    /// # Returns
-    /// Result containing the response (if any)
-    async fn handle_message(&mut self, message: M, context: &MessageContext) -> Result<Option<M::Response>>;
-
-    /// Get metadata about this agent
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata::default()
-    }
-
-    /// Called when the agent is starting up
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    /// Called when the agent is being shut down
-    async fn close(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-/// Core trait that all agents must implement (legacy, for backward compatibility)
-///
-/// The `Agent` trait defines the interface for all agents in the AutoGen system.
-/// Agents are autonomous entities that can receive and process messages, maintain
-/// state, and interact with other agents through the runtime.
+/// This trait replaces the previous dual TypedAgent/Agent design with a single
+/// unified interface that uses TypeSafeMessage for compile-time type safety
+/// while maintaining runtime flexibility.
 #[async_trait]
 pub trait Agent: Send + Sync {
     /// Get the unique identifier for this agent
@@ -58,20 +21,27 @@ pub trait Agent: Send + Sync {
     /// Handle an incoming message
     ///
     /// This is the primary method agents use to process incoming messages.
-    /// The message is type-erased to allow for flexible message types.
-    /// This corresponds to the Python `on_message` method.
+    /// Uses TypeSafeMessage enum for type safety without Box<dyn Any>.
     ///
     /// # Arguments
-    /// * `message` - The incoming message (type-erased)
-    /// * `ctx` - Context information about the message
+    /// * `message` - The incoming message (type-safe enum)
+    /// * `context` - Context information about the message
     ///
     /// # Returns
-    /// An optional response message (type-erased)
-    async fn on_message(
+    /// An optional response message
+    async fn handle_message(
         &mut self,
-        message: Box<dyn Any + Send>,
-        ctx: &MessageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>>;
+        message: TypeSafeMessage,
+        context: &MessageContext,
+    ) -> Result<Option<TypeSafeMessage>>;
+
+    /// Get metadata about this agent
+    ///
+    /// Returns information about the agent's capabilities, subscriptions,
+    /// and other metadata that the runtime can use for optimization.
+    fn metadata(&self) -> AgentMetadata {
+        AgentMetadata::default()
+    }
 
     /// Called when the agent is started
     ///
@@ -87,14 +57,6 @@ pub trait Agent: Send + Sync {
     /// is being shut down.
     async fn on_stop(&mut self) -> Result<()> {
         Ok(())
-    }
-
-    /// Get metadata about this agent
-    ///
-    /// Returns information about the agent's capabilities, subscriptions,
-    /// and other metadata that the runtime can use for optimization.
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata::default()
     }
 
     /// Save the current state of the agent
@@ -156,71 +118,7 @@ impl Default for AgentMetadata {
     }
 }
 
-/// Adapter to convert TypedAgent to Agent for backward compatibility
-pub struct TypedAgentAdapter<M: Message, A: TypedAgent<M>> {
-    inner: A,
-    _phantom: std::marker::PhantomData<M>,
-}
-
-impl<M: Message, A: TypedAgent<M>> TypedAgentAdapter<M, A> {
-    /// Create a new adapter
-    pub fn new(agent: A) -> Self {
-        Self {
-            inner: agent,
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    /// Get a reference to the inner typed agent
-    pub fn inner(&self) -> &A {
-        &self.inner
-    }
-
-    /// Get a mutable reference to the inner typed agent
-    pub fn inner_mut(&mut self) -> &mut A {
-        &mut self.inner
-    }
-}
-
-#[async_trait]
-impl<M: Message, A: TypedAgent<M>> Agent for TypedAgentAdapter<M, A> {
-    fn id(&self) -> &AgentId {
-        self.inner.id()
-    }
-
-    async fn on_message(
-        &mut self,
-        message: Box<dyn Any + Send>,
-        ctx: &MessageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>> {
-        // Try to downcast the message to the expected type
-        match message.downcast::<M>() {
-            Ok(typed_message) => {
-                let response = self.inner.handle_message(*typed_message, ctx).await?;
-                Ok(response.map(|r| Box::new(r) as Box<dyn Any + Send>))
-            }
-            Err(_) => {
-                Err(crate::AutoGenError::other(format!(
-                    "Agent {} cannot handle message of type {}",
-                    self.id(),
-                    std::any::type_name::<M>()
-                )))
-            }
-        }
-    }
-
-    fn metadata(&self) -> AgentMetadata {
-        self.inner.metadata()
-    }
-
-    async fn on_start(&mut self) -> Result<()> {
-        self.inner.start().await
-    }
-
-    async fn on_stop(&mut self) -> Result<()> {
-        self.inner.close().await
-    }
-}
+// TypedAgent and TypedAgentAdapter removed in favor of unified Agent trait
 
 /// Type identifier for agents
 ///
@@ -274,22 +172,22 @@ impl AgentProxy {
     }
 
     /// Send a message to the target agent
-    pub async fn send_message<T: Send + Sync + 'static>(
+    pub async fn send_message(
         &self,
-        message: T,
+        message: crate::TypeSafeMessage,
     ) -> Result<()> {
         self.runtime_handle
-            .send_message(self.agent_id.clone(), Box::new(message))
+            .send_message(self.agent_id.clone(), message)
             .await
     }
 
     /// Send a message and wait for a response
-    pub async fn send_request<T: Send + Sync + 'static, R: Send + Sync + 'static>(
+    pub async fn send_request(
         &self,
-        message: T,
-    ) -> Result<R> {
+        message: crate::TypeSafeMessage,
+    ) -> Result<crate::TypeSafeMessage> {
         self.runtime_handle
-            .send_request(self.agent_id.clone(), Box::new(message))
+            .send_request(self.agent_id.clone(), message)
             .await
     }
 }
@@ -319,7 +217,7 @@ impl RuntimeHandle {
     pub async fn send_message(
         &self,
         _target: AgentId,
-        _message: Box<dyn Any + Send>,
+        _message: TypeSafeMessage,
     ) -> Result<()> {
         // TODO: Implement actual message sending
         Ok(())
@@ -333,11 +231,11 @@ impl RuntimeHandle {
     ///
     /// # Returns
     /// The response from the target agent
-    pub async fn send_request<R: Send + Sync + 'static>(
+    pub async fn send_request(
         &self,
         _target: AgentId,
-        _message: Box<dyn Any + Send>,
-    ) -> Result<R> {
+        _message: TypeSafeMessage,
+    ) -> Result<TypeSafeMessage> {
         // For now, return an error indicating this feature is not yet implemented
         // In a full implementation, this would:
         // 1. Send the message to the target agent via the runtime
@@ -355,8 +253,8 @@ impl RuntimeHandle {
     /// * `message` - The message to publish
     pub async fn publish_message(
         &self,
-        _topic_id: TopicId,
-        _message: Box<dyn Any + Send>,
+        _topic_id: crate::TopicId,
+        _message: TypeSafeMessage,
     ) -> Result<()> {
         // TODO: Implement actual topic publishing
         Ok(())

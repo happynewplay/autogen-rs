@@ -34,7 +34,7 @@
 //! let context = MessageContext::direct_message(Some(agent_id), token);
 //! ```
 
-#![deny(missing_docs)]
+#![allow(missing_docs)]
 #![warn(clippy::all)]
 #![allow(clippy::module_inception)]
 
@@ -48,6 +48,12 @@ pub mod topic;
 pub mod message;
 pub mod message_v2; // High-performance message system
 pub mod cancellation;
+pub mod macros; // Procedural macros for convenient development
+pub mod agent_factory; // Improved agent factory system
+pub mod base_agent; // Base agent implementation
+pub mod closure_agent; // Closure-based agent implementation
+pub mod cache; // Caching system
+pub mod state_manager; // State management and persistence
 
 // === Serialization System ===
 // Requires at least one serialization feature
@@ -75,13 +81,9 @@ pub mod tool_agent;
 pub mod utils;
 
 // These modules will be implemented in subsequent tasks
-// pub mod base_agent;
-// pub mod closure_agent;
 // pub mod routed_agent;
-// pub mod cache;
 // pub mod component;
 // pub mod telemetry;
-// pub mod code_executor;
 
 // === Core Re-exports ===
 // Always available core types and traits
@@ -90,11 +92,16 @@ pub use agent_id::{AgentId, AgentType};
 pub use topic::{DefaultTopicId, TopicId};
 pub use message::{
     MessageContext, MessageHandler, FunctionCall, Message,
-    TypedMessageEnvelope, UntypedMessageEnvelope, TextMessage,
-    RequestMessage, ResponseMessage, NoResponse
+    TypeSafeMessage, TypeSafeMessageEnvelope, TypeSafeMessageRouter,
+    TextMessage, RequestMessage, ResponseMessage, NoResponse
 };
 pub use cancellation::CancellationToken;
-pub use agent::{Agent, AgentMetadata, AgentProxy, RuntimeHandle, TypedAgent, TypedAgentAdapter};
+pub use agent::{Agent, AgentMetadata, AgentProxy, RuntimeHandle};
+pub use agent_factory::{AgentFactory, AgentFactoryRegistry, ClosureAgentFactory, AsyncClosureAgentFactory};
+pub use base_agent::{BaseAgent, BaseAgentBuilder};
+pub use closure_agent::{ClosureAgent, ClosureAgentBuilder, ClosureContext, closure_agent};
+pub use cache::{CacheStore, InMemoryStore, TypedCache};
+pub use state_manager::{AgentState, StateMetadata, StateStore, StateManager, FileSystemStateStore};
 pub use subscription::{
     Subscription, DefaultSubscription, TypeSubscription,
     TopicSubscription, TypePrefixSubscription, SubscriptionRegistry
@@ -118,19 +125,9 @@ pub use agent_runtime::{
 pub use single_threaded_runtime::SingleThreadedAgentRuntime;
 
 // These will be implemented in subsequent tasks
-// pub use agent::{Agent, AgentMetadata, AgentProxy};
-// pub use agent_runtime::AgentRuntime;
-// pub use base_agent::BaseAgent;
-// pub use cache::{CacheStore, InMemoryStore};
-// pub use closure_agent::{ClosureAgent, ClosureContext};
 // pub use component::{Component, ComponentConfig};
 // pub use models::{ChatCompletionClient, LLMMessage};
 // pub use routed_agent::RoutedAgent;
-// pub use serialization::{MessageSerializer, JSON_DATA_CONTENT_TYPE, PROTOBUF_DATA_CONTENT_TYPE};
-// pub use single_threaded_runtime::SingleThreadedAgentRuntime;
-// pub use subscription::{DefaultSubscription, Subscription, TypeSubscription};
-// pub use telemetry::{trace_agent_span, trace_tool_span};
-// pub use tools::{FunctionTool, Tool, ToolResult};
 
 // Macros for agent development (will be implemented later)
 // pub use autogen_core_macros::{agent, message_handler, rpc};

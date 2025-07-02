@@ -31,8 +31,8 @@ tokio = { version = "1.0", features = ["full"] }
 
 ```rust
 use autogen_core::{
-    TypedAgent, AgentId, TextMessage, MessageContext,
-    NoResponse, Result, CancellationToken
+    Agent, AgentId, TypeSafeMessage, TextMessage, MessageContext,
+    Result, CancellationToken
 };
 use async_trait::async_trait;
 
@@ -50,18 +50,25 @@ impl EchoAgent {
 }
 
 #[async_trait]
-impl TypedAgent<TextMessage> for EchoAgent {
+impl Agent for EchoAgent {
     fn id(&self) -> &AgentId {
         &self.id
     }
 
     async fn handle_message(
         &mut self,
-        message: TextMessage,
+        message: TypeSafeMessage,
         _context: &MessageContext,
-    ) -> Result<Option<NoResponse>> {
-        println!("Echo: {}", message.content);
-        Ok(Some(NoResponse))
+    ) -> Result<Option<TypeSafeMessage>> {
+        match message {
+            TypeSafeMessage::Text(text_msg) => {
+                println!("Echo: {}", text_msg.content);
+                Ok(Some(TypeSafeMessage::Text(TextMessage {
+                    content: format!("Echo: {}", text_msg.content),
+                })))
+            }
+            _ => Ok(None), // Don't handle other message types
+        }
     }
 }
 
@@ -84,10 +91,9 @@ async fn main() -> Result<()> {
 
 ### Agents
 
-Agents are autonomous entities that process messages and perform actions. AutoGen Core provides two main agent traits:
+Agents are autonomous entities that process messages and perform actions. AutoGen Core provides a unified agent trait:
 
-- **`TypedAgent<M>`**: Type-safe agent that handles specific message types
-- **`Agent`**: Legacy trait for backward compatibility
+- **`Agent`**: Unified type-safe agent trait that uses `TypeSafeMessage` for compile-time safety
 
 ### Messages
 
@@ -195,7 +201,7 @@ impl EfficientMessage for CustomMessage {
 ### Type-Safe Agents
 
 ```rust
-use autogen_core::{TypedAgent, AgentId, MessageContext, Result};
+use autogen_core::{Agent, AgentId, TypeSafeMessage, MessageContext, Result};
 use async_trait::async_trait;
 
 #[derive(Debug)]
@@ -205,24 +211,36 @@ struct MyAgent {
 }
 
 #[async_trait]
-impl TypedAgent<MyMessage> for MyAgent {
+impl Agent for MyAgent {
     fn id(&self) -> &AgentId {
         &self.id
     }
 
     async fn handle_message(
         &mut self,
-        message: MyMessage,
+        message: TypeSafeMessage,
         context: &MessageContext,
-    ) -> Result<Option<MyResponse>> {
-        // Process the message
-        self.state.update(&message);
-        
-        // Return response
-        Ok(Some(MyResponse {
-            success: true,
-            data: "Processed".to_string(),
-        }))
+    ) -> Result<Option<TypeSafeMessage>> {
+        match message {
+            TypeSafeMessage::Custom { message_type, payload } if message_type == "MyMessage" => {
+                // Deserialize custom message
+                let my_message: MyMessage = serde_json::from_value(payload)?;
+
+                // Process the message
+                self.state.update(&my_message);
+
+                // Return response
+                let response = MyResponse {
+                    success: true,
+                    data: "Processed".to_string(),
+                };
+                Ok(Some(TypeSafeMessage::Custom {
+                    message_type: "MyResponse".to_string(),
+                    payload: serde_json::to_value(response)?,
+                }))
+            }
+            _ => Ok(None), // Don't handle other message types
+        }
     }
 }
 ```
@@ -462,15 +480,15 @@ println!("Performance: {:.1}% allocation avoidance", metrics.allocation_avoidanc
 
 | Python | Rust | Notes |
 |--------|------|-------|
-| `Agent` | `TypedAgent<M>` | Type-safe in Rust |
-| `on_message` | `handle_message` | Different signature |
+| `Agent` | `Agent` | Unified trait in Rust |
+| `on_message` | `handle_message` | Uses `TypeSafeMessage` |
 | Dynamic typing | Static typing | Compile-time type checking |
 | GIL limitations | True parallelism | Better performance |
 
 ### Migration Steps
 
 1. **Define Message Types**: Convert Python message classes to Rust structs
-2. **Implement Agents**: Use `TypedAgent<M>` trait
+2. **Implement Agents**: Use unified `Agent` trait with `TypeSafeMessage`
 3. **Update Runtime**: Use `SingleThreadedAgentRuntime` or custom runtime
 4. **Handle Errors**: Use Rust's `Result` type
 5. **Test Thoroughly**: Leverage Rust's type system for correctness
@@ -489,15 +507,24 @@ class MyAgent(Agent):
 Rust:
 ```rust
 #[async_trait]
-impl TypedAgent<TextMessage> for MyAgent {
+impl Agent for MyAgent {
+    fn id(&self) -> &AgentId {
+        &self.id
+    }
+
     async fn handle_message(
         &mut self,
-        message: TextMessage,
+        message: TypeSafeMessage,
         _ctx: &MessageContext,
-    ) -> Result<Option<TextMessage>> {
-        Ok(Some(TextMessage {
-            content: format!("Echo: {}", message.content),
-        }))
+    ) -> Result<Option<TypeSafeMessage>> {
+        match message {
+            TypeSafeMessage::Text(text_msg) => {
+                Ok(Some(TypeSafeMessage::Text(TextMessage {
+                    content: format!("Echo: {}", text_msg.content),
+                })))
+            }
+            _ => Ok(None), // Don't handle other message types
+        }
     }
 }
 ```

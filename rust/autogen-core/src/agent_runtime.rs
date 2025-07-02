@@ -6,11 +6,10 @@
 //! This module is only available when the "runtime" feature is enabled.
 
 #[cfg(feature = "runtime")]
-use crate::{Agent, AgentId, AgentMetadata, Result, TopicId, Subscription, message::MessageRouter, message::UntypedMessageEnvelope};
+use crate::{Agent, AgentId, AgentMetadata, Result, TopicId, Subscription, message::TypeSafeMessageRouter, message::TypeSafeMessageEnvelope};
 #[cfg(feature = "runtime")]
 use async_trait::async_trait;
-#[cfg(feature = "runtime")]
-use std::any::Any;
+
 #[cfg(feature = "runtime")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime")]
@@ -69,7 +68,7 @@ pub trait AgentRuntime: Send + Sync {
     /// * `sender` - Optional ID of the sending agent
     async fn send_message(
         &mut self,
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         recipient: AgentId,
         sender: Option<AgentId>,
     ) -> Result<()>;
@@ -82,7 +81,7 @@ pub trait AgentRuntime: Send + Sync {
     /// * `sender` - Optional ID of the sending agent
     async fn publish_message(
         &mut self,
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         topic_id: TopicId,
         sender: Option<AgentId>,
     ) -> Result<()>;
@@ -98,10 +97,10 @@ pub trait AgentRuntime: Send + Sync {
     /// The response from the recipient agent
     async fn send_request(
         &mut self,
-        message: Box<dyn Any + Send>,
+        message: crate::TypeSafeMessage,
         recipient: AgentId,
         sender: Option<AgentId>,
-    ) -> Result<Box<dyn Any + Send>>;
+    ) -> Result<crate::TypeSafeMessage>;
 
     /// Start the runtime
     ///
@@ -141,7 +140,7 @@ pub struct AgentRegistry {
     /// Agents indexed by ID for O(1) lookup
     agents: Arc<RwLock<HashMap<AgentId, Arc<RwLock<Box<dyn Agent>>>>>>,
     /// Type-based routing for fast message dispatch
-    message_router: Arc<RwLock<MessageRouter>>,
+    message_router: Arc<RwLock<TypeSafeMessageRouter>>,
     /// Agent metadata cache
     metadata_cache: Arc<RwLock<HashMap<AgentId, AgentMetadata>>>,
     /// Performance metrics
@@ -168,7 +167,7 @@ impl AgentRegistry {
     pub fn new() -> Self {
         Self {
             agents: Arc::new(RwLock::new(HashMap::new())),
-            message_router: Arc::new(RwLock::new(MessageRouter::new())),
+            message_router: Arc::new(RwLock::new(TypeSafeMessageRouter::new())),
             metadata_cache: Arc::new(RwLock::new(HashMap::new())),
             metrics: Arc::new(RwLock::new(RegistryMetrics::default())),
         }
@@ -227,7 +226,9 @@ impl AgentRegistry {
 
             Ok(())
         } else {
-            Err(crate::AutoGenError::agent_not_found(agent_id.clone(), vec![]))
+            Err(crate::AutoGenError::Agent(crate::error::AgentError::NotFound {
+                agent_id: agent_id.to_string(),
+            }))
         }
     }
 
@@ -267,7 +268,7 @@ impl AgentRegistry {
     }
 
     /// Route a message with performance tracking
-    pub async fn route_message(&self, envelope: UntypedMessageEnvelope) -> Result<Option<UntypedMessageEnvelope>> {
+    pub async fn route_message(&self, envelope: TypeSafeMessageEnvelope) -> Result<Option<TypeSafeMessageEnvelope>> {
         let start_time = std::time::Instant::now();
 
         let result = {

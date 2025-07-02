@@ -50,26 +50,40 @@ autogen-core = { version = "0.6.2", features = ["runtime", "json", "validation"]
 
 ### ✅ Use Type-Safe Messages
 
-Prefer `TypedAgent<M>` over the legacy `Agent` trait:
+Use the unified `Agent` trait with `TypeSafeMessage`:
 
 ```rust
-// Good: Type-safe agent
+// Good: Type-safe agent with unified trait
 #[async_trait]
-impl TypedAgent<MyMessage> for MyAgent {
-    async fn handle_message(&mut self, message: MyMessage, ctx: &MessageContext) -> Result<Option<MyResponse>> {
-        // Compile-time type safety
-        Ok(Some(MyResponse { data: message.data }))
-    }
-}
-
-// Avoid: Legacy type-erased agent
 impl Agent for MyAgent {
-    async fn on_message(&mut self, message: Box<dyn Any + Send>, ctx: &MessageContext) -> Result<Option<Box<dyn Any + Send>>> {
-        // Runtime type checking required
-        if let Ok(msg) = message.downcast::<MyMessage>() {
-            // ...
+    fn id(&self) -> &AgentId {
+        &self.id
+    }
+
+    async fn handle_message(
+        &mut self,
+        message: TypeSafeMessage,
+        context: &MessageContext,
+    ) -> Result<Option<TypeSafeMessage>> {
+        // Pattern match for type safety
+        match message {
+            TypeSafeMessage::Text(text_msg) => {
+                // Handle text message
+                Ok(Some(TypeSafeMessage::Text(TextMessage {
+                    content: format!("Processed: {}", text_msg.content),
+                })))
+            }
+            TypeSafeMessage::Custom { message_type, payload } if message_type == "MyMessage" => {
+                // Handle custom message type
+                let my_msg: MyMessage = serde_json::from_value(payload)?;
+                let response = MyResponse { data: my_msg.data };
+                Ok(Some(TypeSafeMessage::Custom {
+                    message_type: "MyResponse".to_string(),
+                    payload: serde_json::to_value(response)?,
+                }))
+            }
+            _ => Ok(None), // Message not handled by this agent
         }
-        Ok(None)
     }
 }
 ```

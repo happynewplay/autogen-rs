@@ -36,11 +36,11 @@ impl AgentType {
     pub fn new<T: Into<String>>(type_name: T) -> Result<Self> {
         let type_name = type_name.into();
         if !is_valid_agent_type(&type_name) {
-            return Err(AutoGenError::InvalidAgentType {
-                agent_type: type_name,
-                reason: "Agent type must match the regex pattern".to_string(),
-                expected_format: Some("^[\\w\\-\\.]+$".to_string()),
-            });
+            return Err(AutoGenError::Validation(crate::error::ValidationError::InvalidFormat {
+                field: "agent_type".to_string(),
+                value: type_name,
+                expected_format: "^[\\w\\-\\.]+$".to_string(),
+            }));
         }
         Ok(Self { type_name })
     }
@@ -104,19 +104,15 @@ impl AgentId {
         K: Into<String>,
     {
         let type_str = agent_type.try_into().map_err(|e| {
-            AutoGenError::InvalidAgentType {
-                agent_type: "unknown".to_string(),
-                reason: format!("Failed to convert agent type: {}", e),
-                expected_format: None,
-            }
+            AutoGenError::other(format!("Failed to convert agent type: {}", e))
         })?;
 
         if !is_valid_agent_type(&type_str) {
-            return Err(AutoGenError::InvalidAgentType {
-                agent_type: type_str,
-                reason: "Agent type must match the regex pattern".to_string(),
-                expected_format: Some("^[\\w\\-\\.]+$".to_string()),
-            });
+            return Err(AutoGenError::Validation(crate::error::ValidationError::InvalidFormat {
+                field: "agent_type".to_string(),
+                value: type_str,
+                expected_format: "^[\\w\\-\\.]+$".to_string(),
+            }));
         }
 
         Ok(Self {
@@ -138,10 +134,11 @@ impl AgentId {
     pub fn from_str(agent_id: &str) -> Result<Self> {
         let parts: Vec<&str> = agent_id.splitn(2, '/').collect();
         if parts.len() != 2 {
-            return Err(AutoGenError::InvalidAgentId {
-                agent_id: agent_id.to_string(),
-                reason: "Expected format: 'type/key'".to_string(),
-            });
+            return Err(AutoGenError::Validation(crate::error::ValidationError::InvalidFormat {
+                field: "agent_id".to_string(),
+                value: agent_id.to_string(),
+                expected_format: "type/key".to_string(),
+            }));
         }
         Self::new(parts[0], parts[1])
     }

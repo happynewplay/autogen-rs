@@ -106,7 +106,7 @@ pub async fn tool_agent_caller_loop(
 
                 for call in function_calls {
                     match runtime.send_message(
-                        Box::new(call.clone()),
+                        crate::TypeSafeMessage::FunctionCall(call.clone()),
                         tool_agent_id.clone(),
                         None, // sender
                     ).await {
@@ -122,18 +122,18 @@ pub async fn tool_agent_caller_loop(
                         }
                         Err(e) => {
                             // Handle different types of tool exceptions
-                            let error_result = match e {
-                                crate::error::AutoGenError::ToolNotFound { tool_name, available_tools: _ } => {
+                            let error_result = match &e {
+                                crate::error::AutoGenError::Agent(crate::error::AgentError::FactoryNotFound { agent_type }) => {
                                     FunctionExecutionResult {
-                                        content: format!("Tool not found: {}", tool_name),
+                                        content: format!("Tool not found: {}", agent_type),
                                         call_id: call.id.clone(),
                                         is_error: Some(true),
                                         name: call.name.clone(),
                                     }
                                 }
-                                crate::error::AutoGenError::InvalidArguments { operation, reason, expected_schema: _ } => {
+                                crate::error::AutoGenError::Validation(validation_err) => {
                                     FunctionExecutionResult {
-                                        content: format!("Invalid arguments for {}: {}", operation, reason),
+                                        content: format!("Invalid arguments: {:?}", validation_err),
                                         call_id: call.id.clone(),
                                         is_error: Some(true),
                                         name: call.name.clone(),
@@ -219,7 +219,7 @@ async fn handle_tool_execution_results(
 
     for call in function_calls {
         match runtime.send_message(
-            Box::new(call.clone()),
+            crate::TypeSafeMessage::FunctionCall(call.clone()),
             tool_agent_id.clone(),
             None, // sender
         ).await {

@@ -172,7 +172,7 @@ impl CancellationToken {
     /// ```
     pub fn throw_if_cancelled(&self) -> crate::Result<()> {
         if self.is_cancelled() {
-            Err(crate::AutoGenError::Cancelled)
+            Err(crate::AutoGenError::other("Operation was cancelled"))
         } else {
             Ok(())
         }
@@ -211,7 +211,7 @@ impl CancellationToken {
     {
         tokio::select! {
             result = future => Ok(result),
-            _ = self.wait_for_cancellation() => Err(crate::AutoGenError::Cancelled),
+            _ = self.wait_for_cancellation() => Err(crate::AutoGenError::other("Operation was cancelled")),
         }
     }
 
@@ -232,10 +232,12 @@ impl CancellationToken {
             result = timeout(duration, future) => {
                 match result {
                     Ok(value) => Ok(value),
-                    Err(_) => Err(crate::AutoGenError::timeout(duration.as_millis() as u64)),
+                    Err(_) => Err(crate::AutoGenError::Message(crate::error::MessageError::Timeout {
+                        timeout_ms: duration.as_millis() as u64,
+                    })),
                 }
             },
-            _ = self.wait_for_cancellation() => Err(crate::AutoGenError::Cancelled),
+            _ = self.wait_for_cancellation() => Err(crate::AutoGenError::other("Operation was cancelled")),
         }
     }
 
@@ -337,7 +339,9 @@ mod tests {
             "should not complete"
         }).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().is_cancelled());
+        // Check that we got a cancellation error
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
     }
 
     #[tokio::test]

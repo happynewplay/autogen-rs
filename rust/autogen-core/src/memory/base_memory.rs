@@ -109,66 +109,58 @@ impl ContentType {
         match self {
             ContentType::Text(text) => {
                 if text.len() > limits.max_text_size {
-                    return Err(crate::AutoGenError::validation(
-                        crate::error::ErrorContext::new("content_validation")
-                            .with_detail("content_type", "text")
-                            .with_detail("size", text.len().to_string())
-                            .with_detail("limit", limits.max_text_size.to_string()),
-                        format!("Text content size {} exceeds limit {}", text.len(), limits.max_text_size)
-                    ));
+                    return Err(crate::AutoGenError::Validation(crate::error::ValidationError::OutOfRange {
+                        field: "text_content_size".to_string(),
+                        value: text.len().to_string(),
+                        min: "0".to_string(),
+                        max: limits.max_text_size.to_string(),
+                    }));
                 }
             }
             ContentType::Binary(data) => {
                 if data.len() > limits.max_binary_size {
-                    return Err(crate::AutoGenError::validation(
-                        crate::error::ErrorContext::new("content_validation")
-                            .with_detail("content_type", "binary")
-                            .with_detail("size", data.len().to_string())
-                            .with_detail("limit", limits.max_binary_size.to_string()),
-                        format!("Binary content size {} exceeds limit {}", data.len(), limits.max_binary_size)
-                    ));
+                    return Err(crate::AutoGenError::Validation(crate::error::ValidationError::OutOfRange {
+                        field: "binary_content_size".to_string(),
+                        value: data.len().to_string(),
+                        min: "0".to_string(),
+                        max: limits.max_binary_size.to_string(),
+                    }));
                 }
             }
             ContentType::Json(value) => {
                 let serialized_size = serde_json::to_string(value)
-                    .map_err(|e| crate::AutoGenError::validation(
-                        crate::error::ErrorContext::new("content_validation")
-                            .with_detail("content_type", "json"),
-                        format!("Failed to serialize JSON content: {}", e)
-                    ))?
+                    .map_err(|e| crate::AutoGenError::Serialization(crate::error::SerializationError::JsonSerialization {
+                        details: format!("Failed to serialize JSON content: {}", e),
+                    }))?
                     .len();
                 if serialized_size > limits.max_json_size {
-                    return Err(crate::AutoGenError::validation(
-                        crate::error::ErrorContext::new("content_validation")
-                            .with_detail("content_type", "json")
-                            .with_detail("size", serialized_size.to_string())
-                            .with_detail("limit", limits.max_json_size.to_string()),
-                        format!("JSON content size {} exceeds limit {}", serialized_size, limits.max_json_size)
-                    ));
+                    return Err(crate::AutoGenError::Validation(crate::error::ValidationError::OutOfRange {
+                        field: "json_content_size".to_string(),
+                        value: serialized_size.to_string(),
+                        min: "0".to_string(),
+                        max: limits.max_json_size.to_string(),
+                    }));
                 }
             }
             ContentType::Image { data, format, .. } => {
                 // Validate base64 data
                 let decoded_size = data.len() * 3 / 4; // Approximate decoded size
                 if decoded_size > limits.max_image_size {
-                    return Err(crate::AutoGenError::validation(
-                        crate::error::ErrorContext::new("content_validation")
-                            .with_detail("content_type", "image")
-                            .with_detail("format", format)
-                            .with_detail("size", decoded_size.to_string())
-                            .with_detail("limit", limits.max_image_size.to_string()),
-                        format!("Image content size {} exceeds limit {}", decoded_size, limits.max_image_size)
-                    ));
+                    return Err(crate::AutoGenError::Validation(crate::error::ValidationError::OutOfRange {
+                        field: "image_content_size".to_string(),
+                        value: decoded_size.to_string(),
+                        min: "0".to_string(),
+                        max: limits.max_image_size.to_string(),
+                    }));
                 }
 
                 // Validate image format
                 if !["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&format.to_lowercase().as_str()) {
-                    return Err(crate::AutoGenError::validation(
-                        crate::error::ErrorContext::new("content_validation")
-                            .with_detail("content_type", "image")
-                            .with_detail("format", format),
-                        format!("Unsupported image format: {}", format)
-                    ));
+                    return Err(crate::AutoGenError::Validation(crate::error::ValidationError::InvalidFormat {
+                        field: "image_format".to_string(),
+                        value: format.to_string(),
+                        expected_format: "png, jpg, jpeg, gif, webp, bmp".to_string(),
+                    }));
                 }
             }
         }
@@ -263,12 +255,11 @@ impl MemoryContent {
 
         // Validate MIME type compatibility
         if !self.mime_type.is_compatible_with(&self.content) {
-            return Err(crate::AutoGenError::validation(
-                crate::error::ErrorContext::new("memory_content_validation")
-                    .with_detail("mime_type", self.mime_type.as_str())
-                    .with_detail("content_type", format!("{:?}", self.content)),
-                format!("MIME type {} is not compatible with content type", self.mime_type.as_str())
-            ));
+            return Err(crate::AutoGenError::Validation(crate::error::ValidationError::InvalidFieldValue {
+                field: "mime_type".to_string(),
+                value: self.mime_type.as_str().to_string(),
+                reason: format!("MIME type is not compatible with content type {:?}", self.content),
+            }));
         }
 
         Ok(())

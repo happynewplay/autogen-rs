@@ -203,39 +203,28 @@ impl MessageSerializer for JsonMessageSerializer {
         if let Some(serializer) = self.type_registry.get(&type_id) {
             let json_value = serializer.serialize(message)?;
             let bytes = serde_json::to_vec(&json_value)
-                .map_err(|e| AutoGenError::Serialization {
-                    source: e,
-                    context: crate::error::ErrorContext::new("json_serialization"),
-                })?;
+                .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonSerialization {
+                    details: e.to_string(),
+                }))?;
             Ok((bytes, JSON_DATA_CONTENT_TYPE.to_string()))
         } else {
-            Err(AutoGenError::Other {
-                message: format!("No serializer registered for type: {:?}", type_id),
-                context: crate::error::ErrorContext::new("type_serialization"),
-            })
+            Err(AutoGenError::other(format!("No serializer registered for type: {:?}", type_id)))
         }
     }
 
     fn deserialize(&self, data: &[u8], content_type: &str, type_id: TypeId) -> Result<Box<dyn Any + Send>> {
         if content_type != JSON_DATA_CONTENT_TYPE {
-            return Err(AutoGenError::Other {
-                message: format!("Unsupported content type: {}", content_type),
-                context: crate::error::ErrorContext::new("content_type_validation"),
-            });
+            return Err(AutoGenError::other(format!("Unsupported content type: {}", content_type)));
         }
 
         if let Some(serializer) = self.type_registry.get(&type_id) {
             let json_value: serde_json::Value = serde_json::from_slice(data)
-                .map_err(|e| AutoGenError::Serialization {
-                    source: e,
-                    context: crate::error::ErrorContext::new("json_deserialization"),
-                })?;
+                .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonDeserialization {
+                    details: e.to_string(),
+                }))?;
             serializer.deserialize(&json_value)
         } else {
-            Err(AutoGenError::Other {
-                message: format!("No deserializer registered for type: {:?}", type_id),
-                context: crate::error::ErrorContext::new("type_deserialization"),
-            })
+            Err(AutoGenError::other(format!("No deserializer registered for type: {:?}", type_id)))
         }
     }
 
@@ -282,24 +271,19 @@ where
     fn serialize(&self, value: &dyn Any) -> Result<serde_json::Value> {
         if let Some(typed_value) = value.downcast_ref::<T>() {
             serde_json::to_value(typed_value)
-                .map_err(|e| AutoGenError::Serialization {
-                    source: e,
-                    context: crate::error::ErrorContext::new("type_serialization"),
-                })
+                .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonSerialization {
+                    details: e.to_string(),
+                }))
         } else {
-            Err(AutoGenError::Other {
-                message: "Type mismatch during serialization".to_string(),
-                context: crate::error::ErrorContext::new("type_casting"),
-            })
+            Err(AutoGenError::other("Type mismatch during serialization"))
         }
     }
 
     fn deserialize(&self, value: &serde_json::Value) -> Result<Box<dyn Any + Send>> {
         let typed_value: T = serde_json::from_value(value.clone())
-            .map_err(|e| AutoGenError::Serialization {
-                source: e,
-                context: crate::error::ErrorContext::new("type_deserialization"),
-            })?;
+            .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonDeserialization {
+                details: e.to_string(),
+            }))?;
         Ok(Box::new(typed_value))
     }
 }
@@ -404,13 +388,11 @@ impl SerializedMessage {
         match algorithm {
             CompressionAlgorithm::None => Ok((data, CompressionAlgorithm::None)),
             #[cfg(feature = "compression")]
-            _ => {
+            CompressionAlgorithm::Gzip | CompressionAlgorithm::Lz4 | CompressionAlgorithm::Zstd => {
                 // For now, just return uncompressed data if compression feature is not enabled
                 // In a real implementation, you would add the compression libraries
                 Ok((data, CompressionAlgorithm::None))
             }
-            #[cfg(not(feature = "compression"))]
-            _ => Ok((data, CompressionAlgorithm::None)),
         }
     }
 

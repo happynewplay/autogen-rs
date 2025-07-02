@@ -59,13 +59,11 @@ impl TopicId {
     pub fn new<T: Into<String>, S: Into<String>>(topic_type: T, source: S) -> Result<Self> {
         let topic_type = topic_type.into();
         if !is_valid_topic_type(&topic_type) {
-            return Err(AutoGenError::Validation {
-                message: format!(
-                    "Invalid topic type: {}. Must match pattern: ^[\\w\\-\\.\\:=]+\\Z",
-                    topic_type
-                ),
-                context: crate::error::ErrorContext::new("topic_type_validation"),
-            });
+            return Err(AutoGenError::Validation(crate::error::ValidationError::InvalidFormat {
+                field: "topic_type".to_string(),
+                value: topic_type,
+                expected_format: "^[\\w\\-\\.\\:=]+\\Z".to_string(),
+            }));
         }
 
         Ok(Self {

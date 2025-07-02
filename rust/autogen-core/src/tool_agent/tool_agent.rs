@@ -179,10 +179,11 @@ impl ToolAgent {
         let tool = self.tools.iter()
             .find(|tool| tool.name() == message.name)
             .ok_or_else(|| {
-                crate::error::AutoGenError::ToolNotFound {
-                    tool_name: message.name.clone(),
-                    available_tools: self.tools.iter().map(|t| t.name().to_string()).collect(),
-                }
+                crate::error::AutoGenError::other(format!(
+                    "Tool '{}' not found. Available tools: {:?}",
+                    message.name,
+                    self.tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>()
+                ))
             })?;
 
         // Parse arguments
@@ -190,11 +191,11 @@ impl ToolAgent {
             HashMap::new()
         } else {
             serde_json::from_str(&message.arguments)
-                .map_err(|e| crate::error::AutoGenError::InvalidArguments {
-                    operation: format!("tool execution: {}", message.name),
-                    reason: e.to_string(),
-                    expected_schema: None,
-                })?
+                .map_err(|e| crate::error::AutoGenError::other(format!(
+                    "Invalid arguments for tool '{}': {}",
+                    message.name,
+                    e.to_string()
+                )))?
         };
 
         // Execute the tool
@@ -226,15 +227,21 @@ impl Agent for ToolAgent {
         &self.id
     }
 
-    async fn on_message(
+    async fn handle_message(
         &mut self,
-        message: Box<dyn std::any::Any + Send>,
+        message: crate::TypeSafeMessage,
         ctx: &MessageContext,
-    ) -> Result<Option<Box<dyn std::any::Any + Send>>> {
-        // Try to downcast to FunctionCall
-        if let Ok(function_call) = message.downcast::<FunctionCall>() {
-            let result = self.handle_function_call(*function_call, ctx.clone()).await?;
-            return Ok(Some(Box::new(result)));
+    ) -> Result<Option<crate::TypeSafeMessage>> {
+        // Handle FunctionCall messages
+        if let crate::TypeSafeMessage::FunctionCall(function_call) = message {
+            let result = self.handle_function_call(function_call, ctx.clone()).await?;
+            // Convert FunctionExecutionResult to a response message
+            let response_content = if result.is_error.unwrap_or(false) {
+                format!("Error: {}", result.content)
+            } else {
+                result.content
+            };
+            return Ok(Some(crate::TypeSafeMessage::text(response_content)));
         }
 
         // If not a FunctionCall, return None (unhandled)

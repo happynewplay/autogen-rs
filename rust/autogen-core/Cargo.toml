@@ -132,19 +132,3 @@ server = ["runtime", "all-serialization", "networking", "telemetry", "validation
 
 # Client-oriented feature set
 client = ["runtime", "json", "http", "validation"]
-
-[[example]]
-name = "basic_tool_usage"
-required-features = ["json", "runtime"]
-
-[[example]]
-name = "performance_optimization"
-required-features = ["json", "runtime"]
-
-[[example]]
-name = "error_handling"
-required-features = ["runtime"]
-
-[[example]]
-name = "advanced_patterns"
-required-features = ["json", "runtime"]

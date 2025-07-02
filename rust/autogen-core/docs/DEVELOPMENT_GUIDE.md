@@ -24,9 +24,9 @@ The AutoGen Core Rust library is organized into several key modules:
    - Compile-time type checking for message routing
 
 2. **Agent System** (`agent.rs`)
-   - `TypedAgent<M>` trait for type-safe message handling
-   - Legacy `Agent` trait for backward compatibility
-   - Agent adapters for seamless integration
+   - Unified `Agent` trait for type-safe message handling with `TypeSafeMessage`
+   - Agent metadata and lifecycle management
+   - State persistence and recovery
 
 3. **Memory Management** (`memory/`)
    - Content validation and size limits
@@ -59,12 +59,12 @@ async fn handle_message(
 ### After (Type-Safe)
 
 ```rust
-// Type-safe message handling
+// Type-safe message handling with unified trait
 async fn handle_message(
     &mut self,
-    message: M,
-    ctx: &MessageContext,
-) -> Result<Option<M::Response>>;
+    message: TypeSafeMessage,
+    context: &MessageContext,
+) -> Result<Option<TypeSafeMessage>>;
 ```
 
 ### Benefits
@@ -247,8 +247,8 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
 
 ### Migration Strategy
 
-1. **Start with Core Types**: AgentId, TopicId, basic messages
-2. **Implement Agents**: Use TypedAgent for new agents
+1. **Start with Core Types**: AgentId, TopicId, TypeSafeMessage
+2. **Implement Agents**: Use unified Agent trait with pattern matching
 3. **Add Tools**: Leverage type-safe tool system
 4. **Integrate Memory**: Use validated memory content
 5. **Handle Errors**: Adopt structured error handling
@@ -256,15 +256,15 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
 ### Compatibility
 
 - API compatibility maintained where possible
-- Legacy traits available for gradual migration
-- Adapter patterns for seamless integration
+- Unified trait design eliminates confusion
+- Pattern matching provides type safety
 
 ## Best Practices
 
 ### Agent Design
 
 1. **Single Responsibility**: Each agent should have a clear purpose
-2. **Type Safety**: Use TypedAgent for new implementations
+2. **Type Safety**: Use unified Agent trait with pattern matching
 3. **Error Handling**: Always handle errors gracefully
 4. **Resource Cleanup**: Implement proper shutdown procedures
 
