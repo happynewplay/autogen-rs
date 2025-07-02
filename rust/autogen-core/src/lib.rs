@@ -80,8 +80,11 @@ pub mod tools;
 pub mod tool_agent;
 pub mod utils;
 
+// === Routed Agent System ===
+// Message routing and handler system
+pub mod routed_agent;
+
 // These modules will be implemented in subsequent tasks
-// pub mod routed_agent;
 // pub mod component;
 // pub mod telemetry;
 
@@ -124,10 +127,12 @@ pub use agent_runtime::{
 #[cfg(feature = "runtime")]
 pub use single_threaded_runtime::SingleThreadedAgentRuntime;
 
+// === Routed Agent Re-exports ===
+pub use routed_agent::{RoutedAgent, HandlerInfo, HandlerRegistry};
+
 // These will be implemented in subsequent tasks
 // pub use component::{Component, ComponentConfig};
 // pub use models::{ChatCompletionClient, LLMMessage};
-// pub use routed_agent::RoutedAgent;
 
 // Macros for agent development (will be implemented later)
 // pub use autogen_core_macros::{agent, message_handler, rpc};

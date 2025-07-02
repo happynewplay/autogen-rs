@@ -109,15 +109,17 @@ macro_rules! agent_impl {
     };
 }
 
-/// Macro to create a routed agent implementation
+
+
+/// Macro for creating routed agents with message handlers
 ///
-/// This macro provides a convenient way to implement an agent with automatic
-/// message routing, similar to Python's RoutedAgent class.
+/// This macro provides a convenient way to create routed agents with
+/// automatic message handler implementations, similar to Python's RoutedAgent.
 ///
 /// # Example
 ///
 /// ```rust
-/// use autogen_core::{routed_agent, AgentId, TypeSafeMessage, MessageContext, Result};
+/// use autogen_core::{routed_agent, AgentId, TypeSafeMessage, MessageContext, Result, TextMessage, FunctionCall};
 ///
 /// routed_agent! {
 ///     struct MyAgent {
@@ -126,12 +128,12 @@ macro_rules! agent_impl {
 ///     }
 ///
 ///     handlers {
-///         async fn handle_text(&mut self, msg: &TextMessage, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
+///         async fn handle_text_message(&mut self, msg: TextMessage, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
 ///             self.state = msg.content.clone();
 ///             Ok(Some(TypeSafeMessage::text("Received")))
 ///         }
 ///
-///         async fn handle_function_call(&mut self, call: &FunctionCall, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
+///         async fn handle_function_call_message(&mut self, call: FunctionCall, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
 ///             println!("Executing function: {}", call.name);
 ///             Ok(None)
 ///         }
@@ -147,7 +149,7 @@ macro_rules! routed_agent {
 
         handlers {
             $(
-                async fn $handler_name:ident(&mut self, $param:ident: &$msg_type:ident, $ctx:ident: &MessageContext) -> Result<Option<TypeSafeMessage>> $body:block
+                async fn $handler_name:ident(&mut self, $param:ident: $msg_type:ty, $ctx:ident: &MessageContext) -> Result<Option<TypeSafeMessage>> $body:block
             )*
         }
     ) => {
@@ -156,35 +158,42 @@ macro_rules! routed_agent {
         }
 
         impl $agent_name {
+            pub fn new($($field: $field_type,)*) -> Self {
+                Self {
+                    $($field,)*
+                }
+            }
+
             $(
-                async fn $handler_name(&mut self, $param: &$msg_type, $ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> $body
+                async fn $handler_name(&mut self, $param: $msg_type, $ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> $body
             )*
         }
 
         #[async_trait::async_trait]
-        impl $crate::Agent for $agent_name {
-            fn id(&self) -> &$crate::AgentId {
+        impl Agent for $agent_name {
+            fn id(&self) -> &AgentId {
                 &self.id
             }
 
             async fn handle_message(
                 &mut self,
-                message: $crate::TypeSafeMessage,
-                context: &$crate::MessageContext,
-            ) -> $crate::Result<Option<$crate::TypeSafeMessage>> {
-                $crate::handle_messages! {
-                    message, context => {
-                        $(
-                            $msg_type($param) => {
-                                let $ctx = context;
-                                self.$handler_name($param, $ctx).await
-                            },
-                        )*
-                        _ => Ok(None)
-                    }
-                }
+                message: TypeSafeMessage,
+                context: &MessageContext,
+            ) -> Result<Option<TypeSafeMessage>> {
+                self.route_message(message, context).await
             }
         }
+
+        #[async_trait::async_trait]
+        impl $crate::RoutedAgent for $agent_name {
+            // Use default implementations from the trait
+            // Individual handlers will be called through route_message
+        }
+    };
+
+    // Helper macro to implement handler methods - simplified approach
+    (@impl_handlers) => {
+        // Default implementations - handlers will override specific methods
     };
 }
 
