@@ -18,10 +18,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
+use tracing::warn;
 use std::any::{TypeId, Any};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use tracing::{warn, info};
+use tracing::info;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -263,13 +264,38 @@ impl BaseAgent {
 
     /// Save state to a JSON value (equivalent to Python's save_state)
     pub fn save_state(&self) -> Result<Value, Box<dyn Error>> {
-        warn!("save_state is not implemented for BaseAgent. Subclasses should override this method.");
-        Ok(Value::Null)
+        warn!("BaseAgent save_state called - this should be overridden by subclasses for proper state management.");
+
+        // Return basic agent information as default state
+        let mut state = serde_json::Map::new();
+        if let Some(id) = &self.id {
+            state.insert("agent_id".to_string(), serde_json::to_value(id)?);
+        }
+        state.insert("description".to_string(), Value::String(self.description.clone()));
+        state.insert("is_bound".to_string(), Value::Bool(self.is_bound));
+
+        Ok(Value::Object(state))
     }
 
     /// Load state from a JSON value (equivalent to Python's load_state)
-    pub fn load_state(&mut self, _state: Value) -> Result<(), Box<dyn Error>> {
-        warn!("load_state is not implemented for BaseAgent. Subclasses should override this method.");
+    pub fn load_state(&mut self, state: Value) -> Result<(), Box<dyn Error>> {
+        warn!("BaseAgent load_state called - this should be overridden by subclasses for proper state management.");
+
+        // Load basic agent information from state
+        if let Value::Object(state_map) = state {
+            if let Some(description_value) = state_map.get("description") {
+                if let Some(description) = description_value.as_str() {
+                    self.description = description.to_string();
+                }
+            }
+
+            if let Some(is_bound_value) = state_map.get("is_bound") {
+                if let Some(is_bound) = is_bound_value.as_bool() {
+                    self.is_bound = is_bound;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -415,21 +441,66 @@ impl Agent for BaseAgent {
 
     async fn on_message(
         &mut self,
-        _message: Value,
-        _ctx: MessageContext,
+        message: Value,
+        ctx: MessageContext,
     ) -> Result<Value, Box<dyn Error + Send>> {
-        Err(Box::new(GeneralError(
-            "on_message not implemented for BaseAgent".to_string(),
+        // Default implementation that provides better error handling
+        // and logging for debugging purposes
+
+        // Extract message type for logging
+        let message_type = message.get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        // Log the unhandled message for debugging
+        warn!(
+            "BaseAgent received unhandled message. Agent ID: {:?}, Message type: {}, Sender: {:?}, Topic: {:?}",
+            self.id,
+            message_type,
+            ctx.sender,
+            ctx.topic_id
+        );
+
+        // Return a more specific error that indicates this is expected behavior
+        // for a base agent that should be subclassed
+        Err(Box::new(crate::exceptions::CantHandleException(
+            format!(
+                "BaseAgent cannot handle message of type '{}'. This agent should be subclassed with specific message handlers.",
+                message_type
+            )
         )))
     }
 
     async fn save_state(&self) -> Result<HashMap<String, Value>, Box<dyn Error>> {
-        println!("Warning: save_state not implemented");
-        Ok(HashMap::new())
+        warn!("BaseAgent save_state called - this should be overridden by subclasses for proper state management");
+
+        // Return basic agent information as default state
+        let mut state = HashMap::new();
+        if let Some(id) = &self.id {
+            state.insert("agent_id".to_string(), serde_json::to_value(id)?);
+        }
+        state.insert("description".to_string(), Value::String(self.description.clone()));
+        state.insert("is_bound".to_string(), Value::Bool(self.is_bound));
+
+        Ok(state)
     }
 
-    async fn load_state(&mut self, _state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
-        println!("Warning: load_state not implemented");
+    async fn load_state(&mut self, state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
+        warn!("BaseAgent load_state called - this should be overridden by subclasses for proper state management");
+
+        // Load basic agent information from state
+        if let Some(description_value) = state.get("description") {
+            if let Some(description) = description_value.as_str() {
+                self.description = description.to_string();
+            }
+        }
+
+        if let Some(is_bound_value) = state.get("is_bound") {
+            if let Some(is_bound) = is_bound_value.as_bool() {
+                self.is_bound = is_bound;
+            }
+        }
+
         Ok(())
     }
 

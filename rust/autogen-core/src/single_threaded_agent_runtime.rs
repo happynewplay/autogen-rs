@@ -558,10 +558,37 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
 
     async fn register_agent_instance(
         &self,
-        _agent: Arc<Mutex<dyn Agent>>,
-        _agent_id: AgentId,
+        agent: Arc<Mutex<dyn Agent>>,
+        agent_id: AgentId,
     ) -> Result<AgentId, Box<dyn Error>> {
-        unimplemented!()
+        // Validate that the agent ID is not already registered
+        let already_exists = {
+            let state = self.state.lock().unwrap();
+            state.instantiated_agents.contains_key(&agent_id)
+        };
+
+        if already_exists {
+            return Err(format!("Agent instance with ID {} already registered", agent_id).into());
+        }
+
+        // Clone the agent for storage before binding
+        let boxed_agent = {
+            let agent_guard = agent.lock().unwrap();
+            agent_guard.clone_box()
+        };
+
+        // For now, we'll skip the async bind_id_and_runtime call to avoid Send issues
+        // This is a temporary workaround - in a full implementation, we'd need to
+        // restructure this to handle the async binding properly
+        // TODO: Implement proper async binding without Send issues
+
+        // Store the agent instance in the runtime state
+        {
+            let mut state = self.state.lock().unwrap();
+            state.instantiated_agents.insert(agent_id.clone(), boxed_agent);
+        }
+
+        Ok(agent_id)
     }
 
     async fn send_message(
