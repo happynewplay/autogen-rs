@@ -1,388 +1,439 @@
-//! Base agent implementation
-//!
-//! This module provides a base agent implementation that handles common
-//! functionality and provides a foundation for building custom agents.
-
-use crate::{Agent, AgentId, AgentMetadata, MessageContext, Result, TypeSafeMessage};
+use crate::agent::{Agent, AgentFactory};
+use crate::agent_id::AgentId;
+use crate::agent_instantiation::AgentInstantiationContext;
+use crate::agent_metadata::AgentMetadata;
+use crate::agent_runtime::AgentRuntime;
+use crate::agent_type::AgentType;
+use crate::cancellation_token::CancellationToken;
+use crate::exceptions::GeneralError;
+use crate::message_context::MessageContext;
+use crate::topic::TopicId;
+use crate::subscription::Subscription;
+use crate::type_subscription::TypeSubscription;
+use crate::type_prefix_subscription::TypePrefixSubscription;
+use crate::subscription_manager::{add_global_type_subscription, add_global_prefix_subscription};
+use crate::serialization::MessageSerializer;
 use async_trait::async_trait;
+use serde_json::Value;
 use std::collections::HashMap;
+use std::error::Error;
+use std::sync::{Arc, Mutex};
+use std::any::{TypeId, Any};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use tracing::{warn, info};
+use std::future::Future;
+use std::pin::Pin;
 
-/// Base agent implementation that provides common functionality
-///
-/// This agent provides a foundation for building custom agents with
-/// default implementations for common operations like state management,
-/// metadata handling, and lifecycle management.
+/// Subscription information for an agent
+#[derive(Debug, Clone)]
+pub struct SubscriptionInfo {
+    pub subscription_id: String,
+    pub topic_type: String,
+    pub agent_type: String,
+}
+
+/// Global registry for unbound subscriptions (equivalent to Python's internal_unbound_subscriptions_list)
+static UNBOUND_SUBSCRIPTIONS: Lazy<DashMap<String, Vec<SubscriptionInfo>>> =
+    Lazy::new(DashMap::new);
+
+/// Global registry for extra handle types (equivalent to Python's internal_extra_handles_types)
+static EXTRA_HANDLES_TYPES: Lazy<DashMap<String, Vec<TypeId>>> =
+    Lazy::new(DashMap::new);
+
+/// Handler function type for message handlers
+pub type MessageHandlerFn = Box<
+    dyn Fn(&mut dyn Any, Value, MessageContext) -> Pin<Box<dyn Future<Output = Result<Value, Box<dyn Error + Send>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Handler function type for event handlers
+pub type EventHandlerFn = Box<
+    dyn Fn(&mut dyn Any, Value, MessageContext) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error + Send>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Handler function type for RPC handlers
+pub type RpcHandlerFn = Box<
+    dyn Fn(&mut dyn Any, Value, MessageContext) -> Pin<Box<dyn Future<Output = Result<Value, Box<dyn Error + Send>>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Global registry for message handlers
+static MESSAGE_HANDLERS: Lazy<DashMap<String, MessageHandlerFn>> = Lazy::new(DashMap::new);
+
+/// Global registry for event handlers
+static EVENT_HANDLERS: Lazy<DashMap<String, EventHandlerFn>> = Lazy::new(DashMap::new);
+
+/// Global registry for RPC handlers
+static RPC_HANDLERS: Lazy<DashMap<String, RpcHandlerFn>> = Lazy::new(DashMap::new);
+
+/// Trait for types that can handle specific message types
+pub trait HandlesType<T> {
+    fn message_type_id() -> TypeId;
+    fn message_type_name() -> &'static str;
+}
+
+/// Trait for agents that have subscriptions
+pub trait HasSubscription {
+    fn get_subscriptions() -> Vec<Box<dyn Subscription>>;
+}
+
+/// Register a handled type for an agent
+pub fn register_handled_type<A: 'static, T: 'static>() {
+    let agent_type = std::any::type_name::<A>().to_string();
+    let message_type_id = TypeId::of::<T>();
+
+    EXTRA_HANDLES_TYPES
+        .entry(agent_type)
+        .or_insert_with(Vec::new)
+        .push(message_type_id);
+}
+
+/// Register a handled type with custom serializer
+pub fn register_handled_type_with_serializer<A: 'static, T: 'static>(
+    _serializer: Box<dyn MessageSerializer<T>>,
+) {
+    // For now, just register the type - serializer integration would be more complex
+    register_handled_type::<A, T>();
+}
+
+/// Register a subscription for an agent
+pub fn register_subscription<A: 'static>(topic: &str, message_type_id: TypeId) {
+    let agent_type = std::any::type_name::<A>().to_string();
+    let sub_info = SubscriptionInfo {
+        subscription_id: format!("{}:{}", agent_type, topic),
+        topic_type: topic.to_string(),
+        agent_type: agent_type.clone(),
+    };
+
+    UNBOUND_SUBSCRIPTIONS
+        .entry(agent_type)
+        .or_insert_with(Vec::new)
+        .push(sub_info);
+}
+
+/// Register a message handler
+pub fn register_message_handler<A: 'static, T: 'static>(
+    handler_name: &str,
+    handler: MessageHandlerFn,
+) {
+    let key = format!("{}::{}", std::any::type_name::<A>(), handler_name);
+    MESSAGE_HANDLERS.insert(key, handler);
+}
+
+/// Register an event handler
+pub fn register_event_handler<A: 'static, T: 'static>(
+    handler_name: &str,
+    handler: EventHandlerFn,
+) {
+    let key = format!("{}::{}", std::any::type_name::<A>(), handler_name);
+    EVENT_HANDLERS.insert(key, handler);
+}
+
+/// Register an RPC handler
+pub fn register_rpc_handler<A: 'static, Req: 'static, Res: 'static>(
+    handler_name: &str,
+    handler: RpcHandlerFn,
+) {
+    let key = format!("{}::{}", std::any::type_name::<A>(), handler_name);
+    RPC_HANDLERS.insert(key, handler);
+}
+
+/// Base implementation for the `Agent` trait.
+#[derive(Clone)]
 pub struct BaseAgent {
-    /// Unique identifier for this agent
-    id: AgentId,
-    
-    /// Agent metadata
-    metadata: AgentMetadata,
-    
-    /// Agent state storage
-    state: HashMap<String, serde_json::Value>,
-    
-    /// Whether the agent is currently running
-    is_running: bool,
+    id: Option<AgentId>,
+    runtime: Option<Arc<dyn AgentRuntime>>,
+    description: String,
+    /// Local subscriptions for this agent instance
+    subscriptions: Arc<DashMap<String, Box<dyn Subscription>>>,
+    /// Whether this agent has been bound to a runtime
+    is_bound: bool,
 }
 
 impl BaseAgent {
-    /// Create a new base agent
-    ///
-    /// # Arguments
-    /// * `id` - The unique identifier for this agent
-    /// * `metadata` - Optional metadata for the agent
-    pub fn new(id: AgentId, metadata: Option<AgentMetadata>) -> Self {
-        Self {
-            id,
-            metadata: metadata.unwrap_or_default(),
-            state: HashMap::new(),
-            is_running: false,
+    /// Creates a new `BaseAgent`.
+    pub fn new(description: String) -> Self {
+        let mut agent = Self {
+            id: None,
+            runtime: None,
+            description,
+            subscriptions: Arc::new(DashMap::new()),
+            is_bound: false,
+        };
+
+        if AgentInstantiationContext::is_in_factory_call() {
+            agent.id = Some(AgentInstantiationContext::current_agent_id());
+            agent.runtime = Some(AgentInstantiationContext::current_runtime());
+            agent.is_bound = true;
+        }
+
+        agent
+    }
+
+    /// Bind the agent to a runtime and agent ID (equivalent to Python's bind_id_and_runtime)
+    pub fn bind_id_and_runtime(&mut self, agent_id: AgentId, runtime: Arc<dyn AgentRuntime>) {
+        self.id = Some(agent_id);
+        self.runtime = Some(runtime);
+        self.is_bound = true;
+
+        // Process any unbound subscriptions for this agent type
+        if let Some(agent_id) = &self.id {
+            self.process_unbound_subscriptions(&agent_id.r#type);
         }
     }
 
-    /// Create a new base agent with a description
-    ///
-    /// # Arguments
-    /// * `id` - The unique identifier for this agent
-    /// * `description` - Description of the agent
-    pub fn with_description<S: Into<String>>(id: AgentId, description: S) -> Self {
-        let mut metadata = AgentMetadata::default();
-        metadata.description = Some(description.into());
-        Self::new(id, Some(metadata))
+    /// Process unbound subscriptions for this agent type
+    fn process_unbound_subscriptions(&self, agent_type: &str) {
+        if let Some((_, subscriptions)) = UNBOUND_SUBSCRIPTIONS.remove(agent_type) {
+            for sub_info in subscriptions {
+                info!("Processing unbound subscription: {:?}", sub_info);
+
+                // Create the appropriate subscription based on the topic type
+                let subscription: Box<dyn Subscription> = if sub_info.topic_type.ends_with(':') {
+                    // This is a prefix subscription
+                    Box::new(TypePrefixSubscription::new(
+                        sub_info.topic_type.trim_end_matches(':').to_string(),
+                        AgentType { r#type: sub_info.agent_type.clone() }
+                    ))
+                } else {
+                    // This is a regular type subscription
+                    Box::new(TypeSubscription::new(
+                        sub_info.topic_type.clone(),
+                        AgentType { r#type: sub_info.agent_type.clone() }
+                    ))
+                };
+
+                // Register with the runtime if available
+                if let Some(runtime) = &self.runtime {
+                    // In a real implementation, we would need an async context here
+                    // For now, we'll store it locally and register later
+                    let subscription_id = subscription.id().to_string();
+                    self.subscriptions.insert(subscription_id, subscription);
+                    info!("Registered subscription for agent type: {}", agent_type);
+                }
+            }
+        }
     }
 
-    /// Get the agent's state
-    pub fn state(&self) -> &HashMap<String, serde_json::Value> {
-        &self.state
-    }
+    /// Add a subscription to this agent
+    pub fn add_subscription(&self, subscription: Box<dyn Subscription>) -> Result<(), Box<dyn Error>> {
+        let subscription_id = subscription.id().to_string();
 
-    /// Get a mutable reference to the agent's state
-    pub fn state_mut(&mut self) -> &mut HashMap<String, serde_json::Value> {
-        &mut self.state
-    }
+        // Extract topic type from subscription for proper categorization
+        let topic_type = self.extract_topic_type_from_subscription(&subscription);
 
-    /// Set a state value
-    ///
-    /// # Arguments
-    /// * `key` - The state key
-    /// * `value` - The state value
-    pub fn set_state<K: Into<String>>(&mut self, key: K, value: serde_json::Value) {
-        self.state.insert(key.into(), value);
-    }
+        self.subscriptions.insert(subscription_id.clone(), subscription);
 
-    /// Get a state value
-    ///
-    /// # Arguments
-    /// * `key` - The state key
-    ///
-    /// # Returns
-    /// The state value if it exists
-    pub fn get_state(&self, key: &str) -> Option<&serde_json::Value> {
-        self.state.get(key)
-    }
+        if self.is_bound {
+            // If bound, register with the runtime immediately
+            info!("Registering subscription {} for bound agent", subscription_id);
+            // TODO: In a full async implementation, we would call:
+            // runtime.add_subscription(subscription).await?;
+        } else {
+            // If not bound, add to unbound subscriptions
+            if let Some(agent_id) = &self.id {
+                let sub_info = SubscriptionInfo {
+                    subscription_id,
+                    topic_type,
+                    agent_type: agent_id.r#type.clone(),
+                };
 
-    /// Remove a state value
-    ///
-    /// # Arguments
-    /// * `key` - The state key
-    ///
-    /// # Returns
-    /// The removed value if it existed
-    pub fn remove_state(&mut self, key: &str) -> Option<serde_json::Value> {
-        self.state.remove(key)
-    }
+                UNBOUND_SUBSCRIPTIONS
+                    .entry(agent_id.r#type.clone())
+                    .or_insert_with(Vec::new)
+                    .push(sub_info);
+            }
+        }
 
-    /// Clear all state
-    pub fn clear_state(&mut self) {
-        self.state.clear();
-    }
-
-    /// Check if the agent is running
-    pub fn is_running(&self) -> bool {
-        self.is_running
-    }
-
-    /// Update the agent's metadata
-    ///
-    /// # Arguments
-    /// * `metadata` - The new metadata
-    pub fn set_metadata(&mut self, metadata: AgentMetadata) {
-        self.metadata = metadata;
-    }
-
-    /// Add a tag to the agent's metadata
-    ///
-    /// # Arguments
-    /// * `tag` - The tag to add
-    pub fn add_tag<S: Into<String>>(&mut self, tag: S) {
-        self.metadata.tags.push(tag.into());
-    }
-
-    /// Set a property in the agent's metadata
-    ///
-    /// # Arguments
-    /// * `key` - The property key
-    /// * `value` - The property value
-    pub fn set_property<K: Into<String>, V: Into<String>>(&mut self, key: K, value: V) {
-        self.metadata.properties.insert(key.into(), value.into());
-    }
-
-    /// Handle message processing (override in subclasses)
-    ///
-    /// This method should be overridden by subclasses to provide
-    /// custom message handling logic. The default implementation
-    /// returns None (no response).
-    ///
-    /// # Arguments
-    /// * `message` - The message to handle
-    /// * `context` - The message context
-    ///
-    /// # Returns
-    /// An optional response message
-    pub async fn handle_message_impl(
-        &mut self,
-        _message: TypeSafeMessage,
-        _context: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        // Default implementation does nothing
-        Ok(None)
-    }
-
-    /// Handle agent startup (override in subclasses)
-    ///
-    /// This method is called when the agent is starting up.
-    /// Override this method to perform custom initialization.
-    pub async fn on_start_impl(&mut self) -> Result<()> {
-        self.is_running = true;
         Ok(())
     }
 
-    /// Handle agent shutdown (override in subclasses)
-    ///
-    /// This method is called when the agent is shutting down.
-    /// Override this method to perform custom cleanup.
-    pub async fn on_stop_impl(&mut self) -> Result<()> {
-        self.is_running = false;
+    /// Extract topic type from subscription for categorization
+    fn extract_topic_type_from_subscription(&self, subscription: &Box<dyn Subscription>) -> String {
+        // This is a simplified implementation
+        // In a real implementation, we would need to downcast or use a trait method
+        // to extract the topic type from different subscription types
+        format!("extracted_topic_{}", subscription.id())
+    }
+
+    /// Save state to a JSON value (equivalent to Python's save_state)
+    pub fn save_state(&self) -> Result<Value, Box<dyn Error>> {
+        warn!("save_state is not implemented for BaseAgent. Subclasses should override this method.");
+        Ok(Value::Null)
+    }
+
+    /// Load state from a JSON value (equivalent to Python's load_state)
+    pub fn load_state(&mut self, _state: Value) -> Result<(), Box<dyn Error>> {
+        warn!("load_state is not implemented for BaseAgent. Subclasses should override this method.");
         Ok(())
+    }
+
+    /// Get the agent's description
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Check if the agent is bound to a runtime
+    pub fn is_bound(&self) -> bool {
+        self.is_bound
+    }
+
+    /// Get the agent's ID if bound
+    pub fn agent_id(&self) -> Option<&AgentId> {
+        self.id.as_ref()
+    }
+
+    /// Get the runtime if bound
+    pub fn runtime(&self) -> Option<Arc<dyn AgentRuntime>> {
+        self.runtime.clone()
+    }
+
+    /// Sends a message to another agent.
+    pub async fn send_message(
+        &self,
+        message: Value,
+        recipient: AgentId,
+        cancellation_token: Option<CancellationToken>,
+        message_id: Option<String>,
+    ) -> Result<Value, Box<dyn Error + Send>> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| GeneralError("Runtime not bound".to_string()))
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+        let sender = self
+            .id
+            .as_ref()
+            .ok_or_else(|| GeneralError("ID not bound".to_string()))
+            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+        runtime
+            .send_message(
+                message,
+                recipient,
+                Some(sender.clone()),
+                cancellation_token,
+                message_id,
+            )
+            .await
+    }
+
+    /// Publishes a message to a topic.
+    pub async fn publish_message(
+        &self,
+        message: Value,
+        topic_id: TopicId,
+        cancellation_token: Option<CancellationToken>,
+    ) -> Result<(), Box<dyn Error>> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| GeneralError("Runtime not bound".to_string()))
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        let sender = self
+            .id
+            .as_ref()
+            .ok_or_else(|| GeneralError("ID not bound".to_string()))
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
+        runtime
+            .publish_message(message, topic_id, Some(sender.clone()), cancellation_token)
+            .await
+    }
+
+    /// Registers an instance of an agent with the runtime.
+    pub async fn register_instance(
+        agent: Arc<Mutex<dyn Agent>>,
+        runtime: Arc<dyn AgentRuntime>,
+        agent_id: AgentId,
+    ) -> Result<AgentId, Box<dyn Error>> {
+        let agent_id = runtime
+            .register_agent_instance(agent, agent_id)
+            .await?;
+        // In a full implementation, you would also handle subscriptions here.
+        Ok(agent_id)
+    }
+
+    /// Registers a factory for creating agents of this type.
+    pub async fn register<F>(
+        runtime: Arc<dyn AgentRuntime>,
+        agent_type: String,
+        factory: F,
+    ) -> Result<AgentType, Box<dyn Error>>
+    where
+        F: AgentFactory + 'static,
+    {
+        let agent_type = AgentType { r#type: agent_type };
+        runtime
+            .register_factory(agent_type.clone(), Box::new(factory))
+            .await?;
+        // In a full implementation, you would also handle subscriptions here.
+        Ok(agent_type)
     }
 }
 
 #[async_trait]
 impl Agent for BaseAgent {
-    fn id(&self) -> &AgentId {
-        &self.id
+    fn clone_box(&self) -> Box<dyn Agent> {
+        Box::new(self.clone())
     }
-
-    async fn handle_message(
-        &mut self,
-        message: TypeSafeMessage,
-        context: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        self.handle_message_impl(message, context).await
-    }
-
     fn metadata(&self) -> AgentMetadata {
-        self.metadata.clone()
-    }
-
-    async fn on_start(&mut self) -> Result<()> {
-        self.on_start_impl().await
-    }
-
-    async fn on_stop(&mut self) -> Result<()> {
-        self.on_stop_impl().await
-    }
-
-    async fn save_state(&self) -> Result<HashMap<String, serde_json::Value>> {
-        Ok(self.state.clone())
-    }
-
-    async fn load_state(&mut self, state: HashMap<String, serde_json::Value>) -> Result<()> {
-        self.state = state;
-        Ok(())
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.on_stop_impl().await
-    }
-}
-
-/// Builder for creating BaseAgent instances
-///
-/// This builder provides a fluent interface for configuring
-/// and creating BaseAgent instances.
-pub struct BaseAgentBuilder {
-    id: Option<AgentId>,
-    metadata: AgentMetadata,
-    initial_state: HashMap<String, serde_json::Value>,
-}
-
-impl BaseAgentBuilder {
-    /// Create a new builder
-    pub fn new() -> Self {
-        Self {
-            id: None,
-            metadata: AgentMetadata::default(),
-            initial_state: HashMap::new(),
+        let id = self.id.as_ref().expect("ID not bound");
+        AgentMetadata {
+            r#type: id.r#type.clone(),
+            key: id.key.clone(),
+            description: self.description.clone(),
         }
     }
 
-    /// Set the agent ID
-    ///
-    /// # Arguments
-    /// * `id` - The agent ID
-    pub fn with_id(mut self, id: AgentId) -> Self {
+    fn id(&self) -> AgentId {
+        self.id.as_ref().expect("ID not bound").clone()
+    }
+
+    async fn bind_id_and_runtime(
+        &mut self,
+        id: AgentId,
+        _runtime: &dyn AgentRuntime,
+    ) -> Result<(), Box<dyn Error>> {
+        if let Some(existing_id) = &self.id {
+            if existing_id != &id {
+                return Err(Box::new(GeneralError(
+                    "Agent is already bound to a different ID".to_string(),
+                )));
+            }
+        }
+        if self.runtime.is_some() {
+            // Cannot compare runtimes directly.
+        }
         self.id = Some(id);
-        self
+        // self.runtime = Some(Arc::from(runtime)); // This is still problematic
+        Ok(())
     }
 
-    /// Set the agent description
-    ///
-    /// # Arguments
-    /// * `description` - The agent description
-    pub fn with_description<S: Into<String>>(mut self, description: S) -> Self {
-        self.metadata.description = Some(description.into());
-        self
+    async fn on_message(
+        &mut self,
+        _message: Value,
+        _ctx: MessageContext,
+    ) -> Result<Value, Box<dyn Error + Send>> {
+        Err(Box::new(GeneralError(
+            "on_message not implemented for BaseAgent".to_string(),
+        )))
     }
 
-    /// Add a tag
-    ///
-    /// # Arguments
-    /// * `tag` - The tag to add
-    pub fn with_tag<S: Into<String>>(mut self, tag: S) -> Self {
-        self.metadata.tags.push(tag.into());
-        self
+    async fn save_state(&self) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        println!("Warning: save_state not implemented");
+        Ok(HashMap::new())
     }
 
-    /// Set a property
-    ///
-    /// # Arguments
-    /// * `key` - The property key
-    /// * `value` - The property value
-    pub fn with_property<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
-        self.metadata.properties.insert(key.into(), value.into());
-        self
+    async fn load_state(&mut self, _state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
+        println!("Warning: load_state not implemented");
+        Ok(())
     }
 
-    /// Set initial state
-    ///
-    /// # Arguments
-    /// * `key` - The state key
-    /// * `value` - The state value
-    pub fn with_state<K: Into<String>>(mut self, key: K, value: serde_json::Value) -> Self {
-        self.initial_state.insert(key.into(), value);
-        self
-    }
-
-    /// Enable concurrent message handling
-    ///
-    /// # Arguments
-    /// * `max_concurrent` - Maximum number of concurrent messages (None for unlimited)
-    pub fn with_concurrency(mut self, max_concurrent: Option<usize>) -> Self {
-        self.metadata.concurrent = true;
-        self.metadata.max_concurrent = max_concurrent;
-        self
-    }
-
-    /// Build the BaseAgent
-    ///
-    /// # Returns
-    /// A configured BaseAgent instance
-    ///
-    /// # Errors
-    /// Returns an error if no agent ID was provided
-    pub fn build(self) -> Result<BaseAgent> {
-        let id = self.id.ok_or_else(|| {
-            crate::AutoGenError::other("Agent ID is required")
-        })?;
-
-        let mut agent = BaseAgent::new(id, Some(self.metadata));
-        agent.state = self.initial_state;
-        Ok(agent)
-    }
-}
-
-impl Default for BaseAgentBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::AgentId;
-
-    #[tokio::test]
-    async fn test_base_agent_creation() {
-        let id = AgentId::new("test", "agent").unwrap();
-        let agent = BaseAgent::new(id.clone(), None);
-
-        assert_eq!(agent.id(), &id);
-        assert!(!agent.is_running());
-        assert!(agent.state().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_base_agent_state_management() {
-        let id = AgentId::new("test", "agent").unwrap();
-        let mut agent = BaseAgent::new(id, None);
-
-        // Test setting and getting state
-        agent.set_state("key1", serde_json::json!("value1"));
-        agent.set_state("key2", serde_json::json!(42));
-
-        assert_eq!(agent.get_state("key1"), Some(&serde_json::json!("value1")));
-        assert_eq!(agent.get_state("key2"), Some(&serde_json::json!(42)));
-        assert_eq!(agent.get_state("nonexistent"), None);
-
-        // Test removing state
-        let removed = agent.remove_state("key1");
-        assert_eq!(removed, Some(serde_json::json!("value1")));
-        assert_eq!(agent.get_state("key1"), None);
-
-        // Test clearing state
-        agent.clear_state();
-        assert!(agent.state().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_base_agent_lifecycle() {
-        let id = AgentId::new("test", "agent").unwrap();
-        let mut agent = BaseAgent::new(id, None);
-
-        assert!(!agent.is_running());
-
-        // Test startup
-        agent.on_start().await.unwrap();
-        assert!(agent.is_running());
-
-        // Test shutdown
-        agent.on_stop().await.unwrap();
-        assert!(!agent.is_running());
-    }
-
-    #[tokio::test]
-    async fn test_base_agent_builder() {
-        let id = AgentId::new("test", "builder").unwrap();
-        
-        let agent = BaseAgentBuilder::new()
-            .with_id(id.clone())
-            .with_description("Test agent")
-            .with_tag("test")
-            .with_property("env", "test")
-            .with_state("counter", serde_json::json!(0))
-            .with_concurrency(Some(5))
-            .build()
-            .unwrap();
-
-        assert_eq!(agent.id(), &id);
-        assert_eq!(agent.metadata().description, Some("Test agent".to_string()));
-        assert!(agent.metadata().tags.contains(&"test".to_string()));
-        assert_eq!(agent.metadata().properties.get("env"), Some(&"test".to_string()));
-        assert_eq!(agent.get_state("counter"), Some(&serde_json::json!(0)));
-        assert!(agent.metadata().concurrent);
-        assert_eq!(agent.metadata().max_concurrent, Some(5));
+    async fn close(&mut self) -> Result<(), Box<dyn Error>> {
+        Ok(())
     }
 }

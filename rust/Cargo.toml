@@ -1,25 +1,11 @@
 [workspace]
-members = [
-    "autogen-core",
-]
+members = ["autogen-core"]
 resolver = "2"
 
-[workspace.package]
-version = "0.6.2"
-edition = "2021"
-license = "MIT"
-authors = ["AutoGen Contributors"]
-repository = "https://github.com/microsoft/autogen"
-homepage = "https://microsoft.github.io/autogen/"
-documentation = "https://docs.rs/autogen-core"
-keywords = ["ai", "agents", "llm", "multi-agent", "async"]
-categories = ["asynchronous", "api-bindings", "development-tools"]
-rust-version = "1.75"
-
 [workspace.dependencies]
-# Async runtime
-tokio = { version = "1.40", features = ["full"] }
-tokio-util = "0.7"
+# Core async runtime
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
 futures = "0.3"
 
 # Serialization
@@ -29,53 +15,35 @@ prost = "0.13"
 prost-types = "0.13"
 
 # Error handling
-thiserror = "1.0"
 anyhow = "1.0"
+thiserror = "1.0"
 
-# Tracing and telemetry
+# Logging and tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = "0.3"
 opentelemetry = "0.26"
 opentelemetry-semantic-conventions = "0.26"
 
-# Utilities
-uuid = { version = "1.0", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-url = { version = "2.0", features = ["serde"] }
-bytes = "1.0"
-dashmap = "6.0"
-regex = "1.0"
-async-trait = "0.1"
-
-# HTTP client for model integrations
+# HTTP client
 reqwest = { version = "0.12", features = ["json", "stream"] }
 
-# Image processing (equivalent to Pillow)
+# Image processing
 image = "0.25"
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Collections and utilities
+dashmap = "6.0"
+once_cell = "1.0"
+parking_lot = "0.12"
+
+# JSON schema and validation
+jsonschema = "0.18"
+schemars = { version = "0.8", features = ["uuid1"] }
 
 # Configuration
 config = "0.14"
-toml = "0.8"
 
 # Testing
-tokio-test = "0.4"
 mockall = "0.13"
-
-# Development dependencies
-criterion = "0.5"
-
-[profile.dev]
-opt-level = 0
-debug = true
-overflow-checks = true
-
-[profile.release]
-opt-level = 3
-debug = false
-lto = true
-codegen-units = 1
-panic = "abort"
-
-[profile.bench]
-inherits = "release"
-debug = true

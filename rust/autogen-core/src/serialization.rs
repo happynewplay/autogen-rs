@@ -1,723 +1,480 @@
-//! Message serialization system
-//!
-//! This module provides serialization and deserialization capabilities for messages
-//! in the autogen system, following the Python autogen-core design.
-//!
-//! This module is only available when serialization features are enabled.
-
-#[cfg(any(feature = "json", feature = "protobuf"))]
-use crate::error::{AutoGenError, Result};
-#[cfg(any(feature = "json", feature = "protobuf"))]
-use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "json", feature = "protobuf"))]
-use std::any::{Any, TypeId};
-#[cfg(any(feature = "json", feature = "protobuf"))]
+use prost::Message;
+use prost_types::Any;
+use serde::{de::DeserializeOwned, Serialize};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
+use crate::type_helpers::{DataclassLike, BaseModelLike};
+use std::any::{TypeId, Any as StdAny};
 use std::collections::HashMap;
-#[cfg(any(feature = "json", feature = "protobuf"))]
 use std::sync::Arc;
 
-#[cfg(feature = "json")]
-/// Content type constants for message serialization
 pub const JSON_DATA_CONTENT_TYPE: &str = "application/json";
-
-#[cfg(feature = "protobuf")]
-/// Content type for Protocol Buffer serialization
 pub const PROTOBUF_DATA_CONTENT_TYPE: &str = "application/x-protobuf";
 
-/// Versioned serialization format
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SerializationVersion {
-    /// Version 1.0 - Basic JSON/Protobuf
-    V1_0,
-    /// Version 1.1 - Added compression support
-    V1_1,
-    /// Version 2.0 - Enhanced type safety
-    V2_0,
+/// Errors that can occur during serialization
+#[derive(Debug)]
+pub enum SerializationError {
+    JsonError(serde_json::Error),
+    ProtobufError(prost::DecodeError),
+    TypeMismatch(String),
+    UnknownType(String),
 }
 
-impl SerializationVersion {
-    /// Get the current version
-    pub fn current() -> Self {
-        Self::V2_0
-    }
-
-    /// Check if this version is compatible with another
-    pub fn is_compatible_with(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::V1_0, Self::V1_0) => true,
-            (Self::V1_1, Self::V1_0 | Self::V1_1) => true,
-            (Self::V1_1, Self::V2_0) => false, // V1.1 can't read V2.0
-            (Self::V2_0, _) => true, // V2.0 is backward compatible
-            (Self::V1_0, Self::V1_1 | Self::V2_0) => false, // V1.0 can't read newer formats
-        }
-    }
-
-    /// Get version string
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::V1_0 => "1.0",
-            Self::V1_1 => "1.1",
-            Self::V2_0 => "2.0",
-        }
-    }
-
-    /// Parse version from string
-    pub fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "1.0" => Ok(Self::V1_0),
-            "1.1" => Ok(Self::V1_1),
-            "2.0" => Ok(Self::V2_0),
-            _ => Err(crate::AutoGenError::other(format!("Unknown serialization version: {}", s))),
-        }
-    }
-}
-
-/// Compression algorithm options
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompressionAlgorithm {
-    /// No compression
-    None,
-    /// Gzip compression
-    #[cfg(feature = "compression")]
-    Gzip,
-    /// LZ4 compression (fast)
-    #[cfg(feature = "compression")]
-    Lz4,
-    /// Zstd compression (high ratio)
-    #[cfg(feature = "compression")]
-    Zstd,
-}
-
-impl CompressionAlgorithm {
-    /// Get the algorithm identifier
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::None => "none",
-            #[cfg(feature = "compression")]
-            Self::Gzip => "gzip",
-            #[cfg(feature = "compression")]
-            Self::Lz4 => "lz4",
-            #[cfg(feature = "compression")]
-            Self::Zstd => "zstd",
-        }
-    }
-
-    /// Parse algorithm from string
-    pub fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "none" => Ok(Self::None),
-            #[cfg(feature = "compression")]
-            "gzip" => Ok(Self::Gzip),
-            #[cfg(feature = "compression")]
-            "lz4" => Ok(Self::Lz4),
-            #[cfg(feature = "compression")]
-            "zstd" => Ok(Self::Zstd),
-            _ => Err(crate::AutoGenError::other(format!("Unknown compression algorithm: {}", s))),
-        }
-    }
-
-    /// Check if compression is beneficial for the given data size
-    pub fn should_compress(&self, _data_size: usize) -> bool {
-        match self {
-            Self::None => false,
-            #[cfg(feature = "compression")]
-            Self::Gzip | Self::Lz4 | Self::Zstd => _data_size > 1024, // Only compress if > 1KB
-        }
-    }
-}
-
-#[cfg(any(feature = "json", feature = "protobuf"))]
-/// Trait for message serialization
-///
-/// This trait defines the interface for serializing and deserializing messages
-/// in different formats (JSON, Protobuf, etc.).
-pub trait MessageSerializer: Send + Sync {
-    /// Serialize a message to bytes
-    ///
-    /// # Arguments
-    /// * `message` - The message to serialize
-    ///
-    /// # Returns
-    /// Serialized message bytes and content type
-    fn serialize(&self, message: &dyn Any) -> Result<(Vec<u8>, String)>;
-
-    /// Deserialize bytes to a message
-    ///
-    /// # Arguments
-    /// * `data` - The serialized data
-    /// * `content_type` - The content type of the data
-    /// * `type_id` - The expected type ID of the message
-    ///
-    /// # Returns
-    /// Deserialized message
-    fn deserialize(&self, data: &[u8], content_type: &str, type_id: TypeId) -> Result<Box<dyn Any + Send>>;
-
-    /// Get the content type this serializer produces
-    fn content_type(&self) -> &str;
-}
-
-/// JSON message serializer
-///
-/// Serializes messages to/from JSON format using serde_json.
-/// This follows the Python autogen-core JSON serialization approach.
-pub struct JsonMessageSerializer {
-    /// Registry of type serializers
-    type_registry: HashMap<TypeId, Arc<dyn TypeSerializer>>,
-}
-
-impl std::fmt::Debug for JsonMessageSerializer {
+impl std::fmt::Display for SerializationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JsonMessageSerializer")
-            .field("type_registry_count", &self.type_registry.len())
-            .finish()
-    }
-}
-
-impl JsonMessageSerializer {
-    /// Create a new JSON message serializer
-    pub fn new() -> Self {
-        Self {
-            type_registry: HashMap::new(),
+        match self {
+            SerializationError::JsonError(e) => write!(f, "JSON error: {}", e),
+            SerializationError::ProtobufError(e) => write!(f, "Protobuf error: {}", e),
+            SerializationError::TypeMismatch(msg) => write!(f, "Type mismatch: {}", msg),
+            SerializationError::UnknownType(msg) => write!(f, "Unknown type: {}", msg),
         }
     }
+}
 
-    /// Register a type for serialization
-    ///
-    /// # Arguments
-    /// * `serializer` - The type serializer for this type
-    pub fn register_type<T: 'static>(&mut self, serializer: Arc<dyn TypeSerializer>) {
-        self.type_registry.insert(TypeId::of::<T>(), serializer);
+impl std::error::Error for SerializationError {}
+
+impl From<serde_json::Error> for SerializationError {
+    fn from(err: serde_json::Error) -> Self {
+        SerializationError::JsonError(err)
     }
 }
 
-impl Default for JsonMessageSerializer {
-    fn default() -> Self {
-        Self::new()
+impl From<prost::DecodeError> for SerializationError {
+    fn from(err: prost::DecodeError) -> Self {
+        SerializationError::ProtobufError(err)
     }
 }
 
-impl MessageSerializer for JsonMessageSerializer {
-    fn serialize(&self, message: &dyn Any) -> Result<(Vec<u8>, String)> {
-        let type_id = message.type_id();
-        
-        if let Some(serializer) = self.type_registry.get(&type_id) {
-            let json_value = serializer.serialize(message)?;
-            let bytes = serde_json::to_vec(&json_value)
-                .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonSerialization {
-                    details: e.to_string(),
-                }))?;
-            Ok((bytes, JSON_DATA_CONTENT_TYPE.to_string()))
-        } else {
-            Err(AutoGenError::other(format!("No serializer registered for type: {:?}", type_id)))
-        }
-    }
-
-    fn deserialize(&self, data: &[u8], content_type: &str, type_id: TypeId) -> Result<Box<dyn Any + Send>> {
-        if content_type != JSON_DATA_CONTENT_TYPE {
-            return Err(AutoGenError::other(format!("Unsupported content type: {}", content_type)));
-        }
-
-        if let Some(serializer) = self.type_registry.get(&type_id) {
-            let json_value: serde_json::Value = serde_json::from_slice(data)
-                .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonDeserialization {
-                    details: e.to_string(),
-                }))?;
-            serializer.deserialize(&json_value)
-        } else {
-            Err(AutoGenError::other(format!("No deserializer registered for type: {:?}", type_id)))
-        }
-    }
-
-    fn content_type(&self) -> &str {
-        JSON_DATA_CONTENT_TYPE
-    }
+/// A trait for serializing and deserializing messages.
+pub trait MessageSerializer<T>: Send + Sync {
+    /// The content type of the serialized data (e.g., "application/json").
+    fn data_content_type(&self) -> &str;
+    /// The name of the type being serialized.
+    fn type_name(&self) -> &str;
+    /// Deserializes a payload into a message.
+    fn deserialize(&self, payload: &[u8]) -> Result<T, SerializationError>;
+    /// Serializes a message into a payload.
+    fn serialize(&self, message: &T) -> Result<Vec<u8>, SerializationError>;
 }
 
-/// Trait for type-specific serialization
-///
-/// This trait allows registration of custom serializers for specific types.
-pub trait TypeSerializer: Send + Sync {
-    /// Serialize a value to JSON
-    fn serialize(&self, value: &dyn Any) -> Result<serde_json::Value>;
-
-    /// Deserialize from JSON
-    fn deserialize(&self, value: &serde_json::Value) -> Result<Box<dyn Any + Send>>;
+/// Enhanced trait for serializers that can be cloned
+pub trait CloneableMessageSerializer<T>: MessageSerializer<T> {
+    fn clone_box(&self) -> Box<dyn CloneableMessageSerializer<T>>;
 }
 
-/// Generic type serializer for types that implement Serialize + Deserialize
-pub struct SerdeTypeSerializer<T> {
+/// A serializer for types that implement `serde::Serialize` and `serde::Deserialize`.
+pub struct JsonSerializer<T: Serialize + DeserializeOwned> {
+    type_name: String,
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T> SerdeTypeSerializer<T> {
-    /// Create a new serde type serializer
-    pub fn new() -> Self {
+impl<T: Serialize + DeserializeOwned> JsonSerializer<T> {
+    pub fn new(type_name: &str) -> Self {
         Self {
+            type_name: type_name.to_string(),
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<T> Default for SerdeTypeSerializer<T> {
-    fn default() -> Self {
-        Self::new()
+impl<T: Serialize + DeserializeOwned + Send + Sync> MessageSerializer<T> for JsonSerializer<T> {
+    fn data_content_type(&self) -> &str {
+        JSON_DATA_CONTENT_TYPE
     }
-}
-
-impl<T> TypeSerializer for SerdeTypeSerializer<T>
-where
-    T: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
-{
-    fn serialize(&self, value: &dyn Any) -> Result<serde_json::Value> {
-        if let Some(typed_value) = value.downcast_ref::<T>() {
-            serde_json::to_value(typed_value)
-                .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonSerialization {
-                    details: e.to_string(),
-                }))
-        } else {
-            Err(AutoGenError::other("Type mismatch during serialization"))
-        }
-    }
-
-    fn deserialize(&self, value: &serde_json::Value) -> Result<Box<dyn Any + Send>> {
-        let typed_value: T = serde_json::from_value(value.clone())
-            .map_err(|e| AutoGenError::Serialization(crate::error::SerializationError::JsonDeserialization {
-                details: e.to_string(),
-            }))?;
-        Ok(Box::new(typed_value))
-    }
-}
-
-/// Message envelope for serialized messages with version control and compression
-///
-/// This wraps a serialized message with metadata needed for routing and processing.
-/// Supports versioning for backward compatibility and optional compression.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SerializedMessage {
-    /// The serialized message data (potentially compressed)
-    pub data: Vec<u8>,
-
-    /// Content type of the serialized data
-    pub content_type: String,
-
-    /// Type name of the original message
-    pub type_name: String,
-
-    /// Serialization format version
-    #[serde(default = "default_version")]
-    pub version: String,
-
-    /// Compression algorithm used (if any)
-    #[serde(default = "default_compression")]
-    pub compression: String,
-
-    /// Original data size (before compression)
-    pub original_size: Option<usize>,
-
-    /// Checksum for data integrity verification
-    pub checksum: Option<String>,
-
-    /// Message metadata
-    pub metadata: HashMap<String, serde_json::Value>,
-
-    /// Timestamp when the message was serialized
-    pub serialized_at: Option<String>,
-}
-
-fn default_version() -> String {
-    SerializationVersion::current().as_str().to_string()
-}
-
-fn default_compression() -> String {
-    CompressionAlgorithm::None.as_str().to_string()
-}
-
-impl SerializedMessage {
-    /// Create a new serialized message with current version
-    pub fn new(
-        data: Vec<u8>,
-        content_type: String,
-        type_name: String,
-        metadata: HashMap<String, serde_json::Value>,
-    ) -> Self {
-        Self {
-            data,
-            content_type,
-            type_name,
-            version: default_version(),
-            compression: default_compression(),
-            original_size: None,
-            checksum: None,
-            metadata,
-            serialized_at: Some(chrono::Utc::now().to_rfc3339()),
-        }
-    }
-
-    /// Create a new serialized message with compression
-    pub fn new_with_compression(
-        data: Vec<u8>,
-        content_type: String,
-        type_name: String,
-        metadata: HashMap<String, serde_json::Value>,
-        compression: CompressionAlgorithm,
-    ) -> Result<Self> {
-        let original_size = data.len();
-        let (compressed_data, actual_compression) = Self::compress_data(data, compression)?;
-
-        let checksum = Self::calculate_checksum(&compressed_data);
-
-        Ok(Self {
-            data: compressed_data,
-            content_type,
-            type_name,
-            version: default_version(),
-            compression: actual_compression.as_str().to_string(),
-            original_size: Some(original_size),
-            checksum: Some(checksum),
-            metadata,
-            serialized_at: Some(chrono::Utc::now().to_rfc3339()),
-        })
-    }
-
-    /// Compress data using the specified algorithm
-    fn compress_data(data: Vec<u8>, algorithm: CompressionAlgorithm) -> Result<(Vec<u8>, CompressionAlgorithm)> {
-        if !algorithm.should_compress(data.len()) {
-            return Ok((data, CompressionAlgorithm::None));
-        }
-
-        match algorithm {
-            CompressionAlgorithm::None => Ok((data, CompressionAlgorithm::None)),
-            #[cfg(feature = "compression")]
-            CompressionAlgorithm::Gzip | CompressionAlgorithm::Lz4 | CompressionAlgorithm::Zstd => {
-                // For now, just return uncompressed data if compression feature is not enabled
-                // In a real implementation, you would add the compression libraries
-                Ok((data, CompressionAlgorithm::None))
-            }
-        }
-    }
-
-    /// Calculate checksum for data integrity
-    fn calculate_checksum(data: &[u8]) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
-    }
-
-    /// Verify data integrity using checksum
-    pub fn verify_integrity(&self) -> Result<bool> {
-        if let Some(expected_checksum) = &self.checksum {
-            let actual_checksum = Self::calculate_checksum(&self.data);
-            Ok(actual_checksum == *expected_checksum)
-        } else {
-            Ok(true) // No checksum to verify
-        }
-    }
-
-    /// Get the size of the serialized data
-    pub fn size(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Get the original size (before compression)
-    pub fn original_size(&self) -> usize {
-        self.original_size.unwrap_or(self.data.len())
-    }
-
-    /// Check if the message is compressed
-    pub fn is_compressed(&self) -> bool {
-        self.compression != CompressionAlgorithm::None.as_str()
-    }
-
-    /// Check if the message is empty
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Get the serialization version
-    pub fn version(&self) -> Result<SerializationVersion> {
-        SerializationVersion::from_str(&self.version)
-    }
-
-    /// Check version compatibility
-    pub fn is_compatible_with_version(&self, version: &SerializationVersion) -> bool {
-        if let Ok(msg_version) = self.version() {
-            version.is_compatible_with(&msg_version)
-        } else {
-            false
-        }
-    }
-
-    /// Get the message data
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-
-    /// Get the content type
-    pub fn content_type(&self) -> &str {
-        &self.content_type
-    }
-
-    /// Get the type name
-    pub fn type_name(&self) -> &str {
+    fn type_name(&self) -> &str {
         &self.type_name
     }
-
-    /// Get the metadata
-    pub fn metadata(&self) -> &HashMap<String, serde_json::Value> {
-        &self.metadata
+    fn deserialize(&self, payload: &[u8]) -> Result<T, SerializationError> {
+        serde_json::from_slice(payload).map_err(SerializationError::from)
     }
-
-    /// Add metadata entry
-    pub fn add_metadata(&mut self, key: String, value: serde_json::Value) {
-        self.metadata.insert(key, value);
+    fn serialize(&self, message: &T) -> Result<Vec<u8>, SerializationError> {
+        serde_json::to_vec(message).map_err(SerializationError::from)
     }
+}
 
-    /// Remove metadata entry
-    pub fn remove_metadata(&mut self, key: &str) -> Option<serde_json::Value> {
-        self.metadata.remove(key)
-    }
+/// A serializer for Protobuf messages.
+pub struct ProtobufSerializer<T: Message + Default> {
+    type_name: String,
+    _phantom: std::marker::PhantomData<T>,
+}
 
-    /// Decompress the message data if it's compressed
-    pub fn decompress(&self) -> Result<Vec<u8>> {
-        if !self.is_compressed() {
-            return Ok(self.data.clone());
-        }
-
-        // For now, just return the data as-is since compression is not implemented
-        // In a real implementation, you would decompress based on self.compression
-        #[cfg(feature = "compression")]
-        {
-            // TODO: Implement actual decompression based on algorithm
-            Ok(self.data.clone())
-        }
-        #[cfg(not(feature = "compression"))]
-        {
-            Ok(self.data.clone())
-        }
-    }
-
-    /// Get the compression ratio (original_size / compressed_size)
-    pub fn compression_ratio(&self) -> Option<f64> {
-        if let Some(original_size) = self.original_size {
-            if self.data.len() > 0 {
-                Some(original_size as f64 / self.data.len() as f64)
-            } else {
-                None
-            }
-        } else {
-            None
+impl<T: Message + Default> ProtobufSerializer<T> {
+    pub fn new(type_name: &str) -> Self {
+        Self {
+            type_name: type_name.to_string(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-/// Advanced message serializer with version control and compression
-#[cfg(any(feature = "json", feature = "protobuf"))]
-#[derive(Debug)]
-pub struct AdvancedMessageSerializer {
-    /// Base JSON serializer
-    json_serializer: JsonMessageSerializer,
-    /// Default compression algorithm
-    default_compression: CompressionAlgorithm,
-    /// Compression threshold (bytes)
-    compression_threshold: usize,
-    /// Enable integrity checking
-    enable_checksums: bool,
-}
-
-#[cfg(any(feature = "json", feature = "protobuf"))]
-impl AdvancedMessageSerializer {
-    /// Create a new advanced serializer
-    pub fn new() -> Self {
-        Self {
-            json_serializer: JsonMessageSerializer::new(),
-            default_compression: CompressionAlgorithm::None,
-            compression_threshold: 1024, // 1KB
-            enable_checksums: true,
-        }
+impl<T: Message + Default + Send + Sync> MessageSerializer<T> for ProtobufSerializer<T> {
+    fn data_content_type(&self) -> &str {
+        PROTOBUF_DATA_CONTENT_TYPE
     }
-
-    /// Create with custom compression settings
-    pub fn with_compression(compression: CompressionAlgorithm, threshold: usize) -> Self {
-        Self {
-            json_serializer: JsonMessageSerializer::new(),
-            default_compression: compression,
-            compression_threshold: threshold,
-            enable_checksums: true,
-        }
+    fn type_name(&self) -> &str {
+        &self.type_name
     }
-
-    /// Set compression algorithm
-    pub fn set_compression(&mut self, compression: CompressionAlgorithm) {
-        self.default_compression = compression;
+    fn deserialize(&self, payload: &[u8]) -> Result<T, SerializationError> {
+        let any_proto = Any::decode(payload)?;
+        // Note: This doesn't check the type_url. A robust implementation should.
+        let message = T::decode(any_proto.value.as_slice())?;
+        Ok(message)
     }
-
-    /// Set compression threshold
-    pub fn set_compression_threshold(&mut self, threshold: usize) {
-        self.compression_threshold = threshold;
-    }
-
-    /// Enable or disable checksums
-    pub fn set_checksums_enabled(&mut self, enabled: bool) {
-        self.enable_checksums = enabled;
-    }
-
-    /// Serialize a message with advanced features
-    pub fn serialize_advanced(&self, message: &dyn Any) -> Result<SerializedMessage> {
-        // First serialize using the base serializer
-        let (data, content_type) = self.json_serializer.serialize(message)?;
-        let type_name = format!("{:?}", message.type_id());
-
-        let mut metadata = HashMap::new();
-        metadata.insert("serializer".to_string(), serde_json::Value::String("advanced".to_string()));
-
-        // Determine if we should compress
-        let should_compress = self.default_compression != CompressionAlgorithm::None
-            && data.len() >= self.compression_threshold;
-
-        if should_compress {
-            SerializedMessage::new_with_compression(
-                data,
-                content_type,
-                type_name,
-                metadata,
-                self.default_compression,
-            )
-        } else {
-            let mut msg = SerializedMessage::new(data, content_type, type_name, metadata);
-
-            // Add checksum if enabled
-            if self.enable_checksums {
-                let checksum = SerializedMessage::calculate_checksum(&msg.data);
-                msg.checksum = Some(checksum);
-            }
-
-            Ok(msg)
-        }
-    }
-
-    /// Deserialize a message with version compatibility checking
-    pub fn deserialize_advanced(&self, msg: &SerializedMessage, type_id: TypeId) -> Result<Box<dyn Any + Send>> {
-        // Check version compatibility
-        let current_version = SerializationVersion::current();
-        if !msg.is_compatible_with_version(&current_version) {
-            return Err(crate::AutoGenError::other(format!(
-                "Incompatible serialization version: {} (current: {})",
-                msg.version, current_version.as_str()
-            )));
-        }
-
-        // Verify integrity if checksum is present
-        if !msg.verify_integrity()? {
-            return Err(crate::AutoGenError::other("Message integrity check failed"));
-        }
-
-        // Get the actual data (decompress if needed)
-        let data = if msg.is_compressed() {
-            msg.decompress()?
-        } else {
-            msg.data().to_vec()
+    fn serialize(&self, message: &T) -> Result<Vec<u8>, SerializationError> {
+        let any_proto = Any {
+            type_url: format!("type.googleapis.com/{}", self.type_name()),
+            value: message.encode_to_vec(),
         };
-
-        // Deserialize using the base serializer
-        self.json_serializer.deserialize(&data, msg.content_type(), type_id)
+        Ok(any_proto.encode_to_vec())
     }
+}
 
-    /// Get compression statistics for a message
-    pub fn get_compression_stats(&self, msg: &SerializedMessage) -> CompressionStats {
-        CompressionStats {
-            original_size: msg.original_size(),
-            compressed_size: msg.size(),
-            compression_ratio: msg.compression_ratio().unwrap_or(1.0),
-            algorithm: msg.compression.clone(),
-            is_compressed: msg.is_compressed(),
+/// Serializer for dataclass-like types (equivalent to Python's DataclassJsonMessageSerializer)
+#[derive(Clone)]
+pub struct DataclassJsonSerializer<T: DataclassLike> {
+    type_name: String,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: DataclassLike> DataclassJsonSerializer<T> {
+    pub fn new(type_name: &str) -> Self {
+        Self {
+            type_name: type_name.to_string(),
+            _phantom: std::marker::PhantomData,
         }
     }
 }
 
-#[cfg(any(feature = "json", feature = "protobuf"))]
-impl Default for AdvancedMessageSerializer {
+impl<T: DataclassLike> MessageSerializer<T> for DataclassJsonSerializer<T> {
+    fn data_content_type(&self) -> &str {
+        JSON_DATA_CONTENT_TYPE
+    }
+    fn type_name(&self) -> &str {
+        &self.type_name
+    }
+    fn deserialize(&self, payload: &[u8]) -> Result<T, SerializationError> {
+        serde_json::from_slice(payload).map_err(SerializationError::from)
+    }
+    fn serialize(&self, message: &T) -> Result<Vec<u8>, SerializationError> {
+        serde_json::to_vec(message).map_err(SerializationError::from)
+    }
+}
+
+/// Serializer for base model-like types (equivalent to Python's PydanticJsonMessageSerializer)
+#[derive(Clone)]
+pub struct BaseModelJsonSerializer<T: BaseModelLike> {
+    type_name: String,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: BaseModelLike> BaseModelJsonSerializer<T> {
+    pub fn new(type_name: &str) -> Self {
+        Self {
+            type_name: type_name.to_string(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: BaseModelLike> MessageSerializer<T> for BaseModelJsonSerializer<T> {
+    fn data_content_type(&self) -> &str {
+        JSON_DATA_CONTENT_TYPE
+    }
+    fn type_name(&self) -> &str {
+        &self.type_name
+    }
+    fn deserialize(&self, payload: &[u8]) -> Result<T, SerializationError> {
+        let result: T = serde_json::from_slice(payload)?;
+        // Validate the deserialized object
+        result.validate().map_err(|e| SerializationError::TypeMismatch(e))?;
+        Ok(result)
+    }
+    fn serialize(&self, message: &T) -> Result<Vec<u8>, SerializationError> {
+        // Validate before serializing
+        message.validate().map_err(|e| SerializationError::TypeMismatch(e))?;
+        serde_json::to_vec(message).map_err(SerializationError::from)
+    }
+}
+
+#[derive(Debug)]
+pub struct UnknownPayload {
+    pub type_name: String,
+    pub data_content_type: String,
+    pub payload: Vec<u8>,
+}
+
+type DynMessageSerializer =
+    Box<dyn Fn(&[u8]) -> Result<Box<dyn std::any::Any + Send>, SerializationError> + Send + Sync>;
+
+type DynMessageSerializerFactory =
+    Box<dyn Fn() -> Box<dyn std::any::Any + Send + Sync> + Send + Sync>;
+
+/// Enhanced serialization registry with automatic type discovery
+pub struct SerializationRegistry {
+    serializers: DashMap<(String, String), DynMessageSerializer>,
+    serializer_factories: DashMap<std::any::TypeId, DynMessageSerializerFactory>,
+}
+
+impl Default for SerializationRegistry {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Compression statistics
-#[derive(Debug, Clone)]
-pub struct CompressionStats {
-    /// Original data size
-    pub original_size: usize,
-    /// Compressed data size
-    pub compressed_size: usize,
-    /// Compression ratio (compressed/original)
-    pub compression_ratio: f64,
-    /// Compression algorithm used
-    pub algorithm: String,
-    /// Whether the data is compressed
-    pub is_compressed: bool,
-}
-
-impl CompressionStats {
-    /// Get space saved in bytes
-    pub fn space_saved(&self) -> usize {
-        self.original_size.saturating_sub(self.compressed_size)
-    }
-
-    /// Get space saved as percentage
-    pub fn space_saved_percent(&self) -> f64 {
-        if self.original_size > 0 {
-            (1.0 - self.compression_ratio) * 100.0
-        } else {
-            0.0
+impl SerializationRegistry {
+    pub fn new() -> Self {
+        Self {
+            serializers: DashMap::new(),
+            serializer_factories: DashMap::new(),
         }
     }
+
+    pub fn add_serializer<T: 'static + Send + Sync, S: MessageSerializer<T> + Send + Sync + 'static>(
+        &self,
+        serializer: S,
+    ) {
+        let key = (
+            serializer.type_name().to_string(),
+            serializer.data_content_type().to_string(),
+        );
+        let deserializer: DynMessageSerializer =
+            Box::new(move |payload: &[u8]| -> Result<Box<dyn std::any::Any + Send>, SerializationError> {
+                let msg = serializer.deserialize(payload)?;
+                Ok(Box::new(msg))
+            });
+        self.serializers.insert(key, deserializer);
+    }
+
+    /// Add a boxed serializer
+    pub fn add_boxed_serializer<T: 'static + Send + Sync>(
+        &self,
+        serializer: Box<dyn MessageSerializer<T>>,
+    ) {
+        let key = (
+            serializer.type_name().to_string(),
+            serializer.data_content_type().to_string(),
+        );
+        let deserializer: DynMessageSerializer =
+            Box::new(move |payload: &[u8]| -> Result<Box<dyn std::any::Any + Send>, SerializationError> {
+                let msg = serializer.deserialize(payload)?;
+                Ok(Box::new(msg))
+            });
+        self.serializers.insert(key, deserializer);
+    }
+
+    /// Add multiple serializers at once
+    pub fn add_serializers<T: 'static + Send + Sync>(&self, serializers: Vec<Box<dyn MessageSerializer<T>>>) {
+        for serializer in serializers {
+            self.add_boxed_serializer(serializer);
+        }
+    }
+
+    /// Register a factory for automatic serializer creation
+    pub fn register_serializer_factory<T: 'static>(&self, factory: DynMessageSerializerFactory) {
+        self.serializer_factories.insert(std::any::TypeId::of::<T>(), factory);
+    }
+
+    pub fn deserialize(
+        &self,
+        payload: &[u8],
+        type_name: &str,
+        data_content_type: &str,
+    ) -> Result<Box<dyn std::any::Any + Send>, UnknownPayload> {
+        let key = (type_name.to_string(), data_content_type.to_string());
+        if let Some(deserializer) = self.serializers.get(&key) {
+            deserializer(payload).map_err(|_e| UnknownPayload {
+                type_name: type_name.to_string(),
+                data_content_type: data_content_type.to_string(),
+                payload: payload.to_vec(),
+            })
+        } else {
+            Err(UnknownPayload {
+                type_name: type_name.to_string(),
+                data_content_type: data_content_type.to_string(),
+                payload: payload.to_vec(),
+            })
+        }
+    }
+
+    /// Serialize a message with automatic type detection
+    pub fn serialize<T: 'static>(
+        &self,
+        message: &T,
+        type_name: &str,
+        data_content_type: &str,
+    ) -> Result<Vec<u8>, SerializationError> {
+        let key = (type_name.to_string(), data_content_type.to_string());
+        // This is a simplified implementation - in practice, you'd need more sophisticated
+        // type handling for serialization
+        Err(SerializationError::UnknownType(format!(
+            "Serialization not implemented for type {} with content type {}",
+            type_name, data_content_type
+        )))
+    }
+
+    /// Check if a type/content type combination is registered
+    pub fn is_registered(&self, type_name: &str, data_content_type: &str) -> bool {
+        let key = (type_name.to_string(), data_content_type.to_string());
+        self.serializers.contains_key(&key)
+    }
+
+    /// Get the type name for a message (simplified)
+    pub fn type_name<T: 'static>(&self) -> String {
+        std::any::type_name::<T>().to_string()
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Try to get known serializers for a type (equivalent to Python's try_get_known_serializers_for_type)
+/// This is a simplified version that returns an empty vector by default
+/// In practice, you would register serializers explicitly for each type
+pub fn try_get_known_serializers_for_type<T: 'static + Send + Sync>() -> Vec<Box<dyn MessageSerializer<T>>> {
+    // In Rust, we can't do runtime trait checking like Python
+    // Instead, we rely on explicit registration or compile-time trait bounds
+    // This function serves as a placeholder for the Python equivalent
+    Vec::new()
+}
 
-    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-    struct TestMessage {
-        content: String,
-        id: u32,
+/// Specialized function for dataclass-like types
+pub fn try_get_dataclass_serializers<T: DataclassLike + 'static>() -> Vec<Box<dyn MessageSerializer<T>>> {
+    let mut serializers: Vec<Box<dyn MessageSerializer<T>>> = Vec::new();
+    let serializer = DataclassJsonSerializer::<T>::new(std::any::type_name::<T>());
+    serializers.push(Box::new(serializer));
+    serializers
+}
+
+/// Specialized function for base model-like types
+pub fn try_get_base_model_serializers<T: BaseModelLike + 'static>() -> Vec<Box<dyn MessageSerializer<T>>> {
+    let mut serializers: Vec<Box<dyn MessageSerializer<T>>> = Vec::new();
+    let serializer = BaseModelJsonSerializer::<T>::new(std::any::type_name::<T>());
+    serializers.push(Box::new(serializer));
+    serializers
+}
+
+/// Specialized function for protobuf types
+pub fn try_get_protobuf_serializers<T: Message + Default + 'static>() -> Vec<Box<dyn MessageSerializer<T>>> {
+    let mut serializers: Vec<Box<dyn MessageSerializer<T>>> = Vec::new();
+    let serializer = ProtobufSerializer::<T>::new(std::any::type_name::<T>());
+    serializers.push(Box::new(serializer));
+    serializers
+}
+
+/// Specialized function for basic serde types
+pub fn try_get_json_serializers<T: Serialize + DeserializeOwned + Send + Sync + 'static>() -> Vec<Box<dyn MessageSerializer<T>>> {
+    let mut serializers: Vec<Box<dyn MessageSerializer<T>>> = Vec::new();
+    let serializer = JsonSerializer::<T>::new(std::any::type_name::<T>());
+    serializers.push(Box::new(serializer));
+    serializers
+}
+
+/// Convenience functions for global registry operations
+pub fn add_message_serializer<T: 'static + Send + Sync, S: MessageSerializer<T> + Send + Sync + 'static>(
+    serializer: S,
+) {
+    GLOBAL_REGISTRY.add_serializer(serializer);
+}
+
+pub fn add_message_serializers<T: 'static + Send + Sync>(
+    serializers: Vec<Box<dyn MessageSerializer<T>>>,
+) {
+    GLOBAL_REGISTRY.add_serializers(serializers);
+}
+
+pub fn deserialize_message(
+    payload: &[u8],
+    type_name: &str,
+    data_content_type: &str,
+) -> Result<Box<dyn std::any::Any + Send>, UnknownPayload> {
+    GLOBAL_REGISTRY.deserialize(payload, type_name, data_content_type)
+}
+
+pub fn is_message_type_registered(type_name: &str, data_content_type: &str) -> bool {
+    GLOBAL_REGISTRY.is_registered(type_name, data_content_type)
+}
+
+/// Global serialization registry
+static GLOBAL_REGISTRY: Lazy<SerializationRegistry> = Lazy::new(SerializationRegistry::new);
+
+/// Enhanced serialization registry with type safety
+pub struct TypedSerializationRegistry {
+    type_mappings: DashMap<TypeId, Vec<Arc<dyn StdAny + Send + Sync>>>,
+    name_mappings: DashMap<String, TypeId>,
+}
+
+impl TypedSerializationRegistry {
+    pub fn new() -> Self {
+        Self {
+            type_mappings: DashMap::new(),
+            name_mappings: DashMap::new(),
+        }
     }
 
-    #[test]
-    fn test_json_serializer_creation() {
-        let serializer = JsonMessageSerializer::new();
-        assert_eq!(serializer.content_type(), JSON_DATA_CONTENT_TYPE);
+    /// Register a serializer for a specific type with type safety
+    pub fn register_typed_serializer<T: 'static>(
+        &self,
+        serializer: Arc<dyn MessageSerializer<T>>,
+    ) {
+        let type_id = TypeId::of::<T>();
+        let type_name = std::any::type_name::<T>().to_string();
+
+        // Store the serializer in a type-erased way
+        let any_serializer: Arc<dyn StdAny + Send + Sync> = Arc::new(serializer);
+
+        self.type_mappings
+            .entry(type_id)
+            .or_insert_with(Vec::new)
+            .push(any_serializer);
+
+        self.name_mappings.insert(type_name, type_id);
     }
 
-    #[test]
-    fn test_serde_type_serializer() {
-        let serializer = SerdeTypeSerializer::<TestMessage>::new();
-        let message = TestMessage {
-            content: "test".to_string(),
-            id: 42,
-        };
-
-        let json_value = serializer.serialize(&message).unwrap();
-        let deserialized = serializer.deserialize(&json_value).unwrap();
-        let recovered = deserialized.downcast::<TestMessage>().unwrap();
-        
-        assert_eq!(*recovered, message);
+    /// Get serializers for a specific type
+    pub fn get_serializers_for_type<T: 'static>(&self) -> Vec<Arc<dyn MessageSerializer<T>>> {
+        let type_id = TypeId::of::<T>();
+        if let Some(serializers) = self.type_mappings.get(&type_id) {
+            serializers
+                .iter()
+                .filter_map(|s| {
+                    s.downcast_ref::<Arc<dyn MessageSerializer<T>>>()
+                        .map(|arc_ref| arc_ref.clone())
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
     }
 
-    #[test]
-    fn test_serialized_message() {
-        let data = b"test data".to_vec();
-        let content_type = JSON_DATA_CONTENT_TYPE.to_string();
-        let type_name = "TestMessage".to_string();
-        let metadata = HashMap::new();
-
-        let serialized = SerializedMessage::new(data.clone(), content_type.clone(), type_name.clone(), metadata);
-        
-        assert_eq!(serialized.data(), data.as_slice());
-        assert_eq!(serialized.content_type(), content_type);
-        assert_eq!(serialized.type_name(), type_name);
-        assert!(serialized.metadata().is_empty());
+    /// Check if a type has registered serializers
+    pub fn has_serializers_for_type<T: 'static>(&self) -> bool {
+        let type_id = TypeId::of::<T>();
+        self.type_mappings.contains_key(&type_id)
     }
+}
+
+/// Global typed serialization registry
+static TYPED_REGISTRY: Lazy<TypedSerializationRegistry> = Lazy::new(TypedSerializationRegistry::new);
+
+/// Register a typed serializer globally
+pub fn register_typed_serializer<T: 'static>(serializer: Arc<dyn MessageSerializer<T>>) {
+    TYPED_REGISTRY.register_typed_serializer(serializer);
+}
+
+/// Get typed serializers for a type
+pub fn get_typed_serializers<T: 'static>() -> Vec<Arc<dyn MessageSerializer<T>>> {
+    TYPED_REGISTRY.get_serializers_for_type::<T>()
+}
+
+/// Check if a type has registered serializers
+pub fn has_typed_serializers<T: 'static>() -> bool {
+    TYPED_REGISTRY.has_serializers_for_type::<T>()
+}
+
+/// Helper macro for automatically registering serializers for a type
+#[macro_export]
+macro_rules! register_message_serializers {
+    ($type:ty) => {
+        {
+            let serializers = try_get_known_serializers_for_type::<$type>();
+            add_message_serializers(serializers);
+        }
+    };
 }

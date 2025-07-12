@@ -1,277 +1,237 @@
-//! Macros for convenient agent and message handling
-//!
-//! This module provides macros that simplify agent development
-//! by providing decorator-like syntax similar to Python's @event and @rpc decorators.
+//! Macros for implementing Python-like decorators in Rust
+//! 
+//! This module provides macros that simulate the behavior of Python decorators
+//! used in the autogen-core Python implementation.
 
-// Imports are handled within macro expansions
+use std::any::TypeId;
+use crate::serialization::MessageSerializer;
 
-/// Macro to create a simple message handler dispatcher
-///
-/// This macro generates a match statement that routes TypeSafeMessage variants
-/// to appropriate handler methods, similar to Python's @event decorator.
-///
+/// Macro to implement the `handles` decorator functionality
+/// 
+/// This macro adds type handling capabilities to an agent, similar to
+/// Python's `@handles` decorator.
+/// 
 /// # Example
-///
 /// ```rust
-/// use autogen_core::{handle_messages, TypeSafeMessage, MessageContext, Result};
-///
-/// impl MyAgent {
-///     async fn handle_message(&mut self, message: TypeSafeMessage, context: &MessageContext) -> Result<Option<TypeSafeMessage>> {
-///         handle_messages! {
-///             message, context => {
-///                 Text(msg) => self.handle_text(msg, context).await,
-///                 FunctionCall(call) => self.handle_function_call(call, context).await,
-///                 Request(req) => self.handle_request(req, context).await,
-///                 _ => Ok(None)
-///             }
-///         }
-///     }
-/// }
+/// use autogen_core::handles;
+/// 
+/// #[derive(Debug)]
+/// struct MyAgent;
+/// 
+/// handles!(MyAgent, String); // Agent can handle String messages
 /// ```
 #[macro_export]
-macro_rules! handle_messages {
-    ($message:expr, $context:expr => {
-        $($variant:ident($param:ident) => $handler:expr,)*
-        _ => $default:expr
-    }) => {
-        match $message {
-            $(
-                $crate::TypeSafeMessage::$variant($param) => $handler,
-            )*
-            _ => $default,
+macro_rules! handles {
+    ($agent_type:ty, $message_type:ty) => {
+        impl $crate::base_agent::HandlesType<$message_type> for $agent_type {
+            fn message_type_id() -> std::any::TypeId {
+                std::any::TypeId::of::<$message_type>()
+            }
+            
+            fn message_type_name() -> &'static str {
+                std::any::type_name::<$message_type>()
+            }
         }
+        
+        // Register the type globally
+        $crate::base_agent::register_handled_type::<$agent_type, $message_type>();
+    };
+    
+    ($agent_type:ty, $message_type:ty, $serializer:expr) => {
+        impl $crate::base_agent::HandlesType<$message_type> for $agent_type {
+            fn message_type_id() -> std::any::TypeId {
+                std::any::TypeId::of::<$message_type>()
+            }
+            
+            fn message_type_name() -> &'static str {
+                std::any::type_name::<$message_type>()
+            }
+        }
+        
+        // Register the type with custom serializer
+        $crate::base_agent::register_handled_type_with_serializer::<$agent_type, $message_type>($serializer);
     };
 }
 
-/// Macro to create an agent with automatic message routing
-///
-/// This macro generates the boilerplate code for implementing the Agent trait
-/// with automatic message routing based on method signatures.
-///
+/// Macro to implement subscription factory functionality
+/// 
+/// This macro adds subscription capabilities to an agent, similar to
+/// Python's subscription decorators.
+/// 
 /// # Example
-///
 /// ```rust
-/// use autogen_core::{agent_impl, AgentId, TypeSafeMessage, MessageContext, Result};
-///
-/// struct MyAgent {
-///     id: AgentId,
-/// }
-///
-/// agent_impl! {
-///     MyAgent {
-///         async fn handle_text(&mut self, msg: &TextMessage, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
-///             println!("Received: {}", msg.content);
-///             Ok(Some(TypeSafeMessage::text("Acknowledged")))
-///         }
-///
-///         async fn handle_function_call(&mut self, call: &FunctionCall, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
-///             println!("Function: {}", call.name);
-///             Ok(None)
-///         }
-///     }
-/// }
+/// use autogen_core::subscription_factory;
+/// 
+/// subscription_factory!(MyAgent, "topic_name", MyMessageType);
 /// ```
 #[macro_export]
-macro_rules! agent_impl {
-    ($agent_type:ident {
-        $(
-            async fn $handler_name:ident(&mut self, $param:ident: &$msg_type:ident, $ctx:ident: &MessageContext) -> Result<Option<TypeSafeMessage>> $body:block
-        )*
-    }) => {
-        #[async_trait::async_trait]
-        impl $crate::Agent for $agent_type {
-            fn id(&self) -> &$crate::AgentId {
-                &self.id
-            }
-
-            async fn handle_message(
-                &mut self,
-                message: $crate::TypeSafeMessage,
-                context: &$crate::MessageContext,
-            ) -> $crate::Result<Option<$crate::TypeSafeMessage>> {
-                match message {
-                    $(
-                        $crate::TypeSafeMessage::$msg_type($param) => {
-                            let $ctx = context;
-                            self.$handler_name($param, $ctx).await
-                        }
-                    )*
-                    _ => Ok(None),
-                }
+macro_rules! subscription_factory {
+    ($agent_type:ty, $topic:expr, $message_type:ty) => {
+        impl $crate::base_agent::HasSubscription for $agent_type {
+            fn get_subscriptions() -> Vec<Box<dyn $crate::subscription::Subscription>> {
+                vec![
+                    Box::new($crate::type_subscription::TypeSubscription::new(
+                        $topic.to_string(),
+                        $crate::agent_type::AgentType {
+                            r#type: std::any::type_name::<$agent_type>().to_string()
+                        },
+                    ))
+                ]
             }
         }
 
+        // Register the subscription globally
+        $crate::base_agent::register_subscription::<$agent_type>($topic, std::any::TypeId::of::<$message_type>());
+    };
+}
+
+/// Macro to implement message handler functionality
+/// 
+/// This macro creates message handlers for agents, similar to
+/// Python's `@message_handler` decorator.
+/// 
+/// # Example
+/// ```rust
+/// use autogen_core::message_handler;
+/// 
+/// message_handler!(MyAgent, handle_string, String, {
+///     |agent: &mut MyAgent, msg: String, ctx: MessageContext| async move {
+///         // Handle the message
+///         Ok(format!("Received: {}", msg))
+///     }
+/// });
+/// ```
+#[macro_export]
+macro_rules! message_handler {
+    ($agent_type:ty, $handler_name:ident, $message_type:ty, $handler:expr) => {
         impl $agent_type {
-            $(
-                async fn $handler_name(&mut self, $param: &$msg_type, $ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> $body
-            )*
-        }
-    };
-}
-
-
-
-/// Macro for creating routed agents with message handlers
-///
-/// This macro provides a convenient way to create routed agents with
-/// automatic message handler implementations, similar to Python's RoutedAgent.
-///
-/// # Example
-///
-/// ```rust
-/// use autogen_core::{routed_agent, AgentId, TypeSafeMessage, MessageContext, Result, TextMessage, FunctionCall};
-///
-/// routed_agent! {
-///     struct MyAgent {
-///         id: AgentId,
-///         state: String,
-///     }
-///
-///     handlers {
-///         async fn handle_text_message(&mut self, msg: TextMessage, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
-///             self.state = msg.content.clone();
-///             Ok(Some(TypeSafeMessage::text("Received")))
-///         }
-///
-///         async fn handle_function_call_message(&mut self, call: FunctionCall, ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
-///             println!("Executing function: {}", call.name);
-///             Ok(None)
-///         }
-///     }
-/// }
-/// ```
-#[macro_export]
-macro_rules! routed_agent {
-    (
-        struct $agent_name:ident {
-            $($field:ident: $field_type:ty,)*
-        }
-
-        handlers {
-            $(
-                async fn $handler_name:ident(&mut self, $param:ident: $msg_type:ty, $ctx:ident: &MessageContext) -> Result<Option<TypeSafeMessage>> $body:block
-            )*
-        }
-    ) => {
-        pub struct $agent_name {
-            $($field: $field_type,)*
-        }
-
-        impl $agent_name {
-            pub fn new($($field: $field_type,)*) -> Self {
-                Self {
-                    $($field,)*
-                }
-            }
-
-            $(
-                async fn $handler_name(&mut self, $param: $msg_type, $ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> $body
-            )*
-        }
-
-        #[async_trait::async_trait]
-        impl Agent for $agent_name {
-            fn id(&self) -> &AgentId {
-                &self.id
-            }
-
-            async fn handle_message(
+            pub async fn $handler_name(
                 &mut self,
-                message: TypeSafeMessage,
-                context: &MessageContext,
-            ) -> Result<Option<TypeSafeMessage>> {
-                self.route_message(message, context).await
+                message: $message_type,
+                ctx: $crate::message_context::MessageContext,
+            ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send>> {
+                let handler = $handler;
+                handler(self, message, ctx).await
             }
         }
-
-        #[async_trait::async_trait]
-        impl $crate::RoutedAgent for $agent_name {
-            // Use default implementations from the trait
-            // Individual handlers will be called through route_message
-        }
-    };
-
-    // Helper macro to implement handler methods - simplified approach
-    (@impl_handlers) => {
-        // Default implementations - handlers will override specific methods
+        
+        // Register the handler
+        $crate::base_agent::register_message_handler::<$agent_type, $message_type>(
+            stringify!($handler_name),
+            |agent, msg, ctx| {
+                Box::pin(async move {
+                    if let Ok(typed_agent) = agent.downcast_mut::<$agent_type>() {
+                        if let Ok(typed_msg) = serde_json::from_value::<$message_type>(msg) {
+                            return typed_agent.$handler_name(typed_msg, ctx).await;
+                        }
+                    }
+                    Err("Type conversion failed".into())
+                })
+            }
+        );
     };
 }
 
-/// Macro for creating simple event handlers
-///
-/// This macro provides a shorthand for creating message handlers
-/// that don't return responses, similar to Python's @event decorator.
-///
-/// # Example
-///
-/// ```rust
-/// use autogen_core::{event_handler, TypeSafeMessage, MessageContext, Result};
-///
-/// event_handler! {
-///     async fn log_text_messages(msg: &TextMessage, ctx: &MessageContext) -> Result<()> {
-///         println!("Received text: {}", msg.content);
-///         Ok(())
-///     }
-/// }
-/// ```
+/// Macro to implement event handler functionality
+/// 
+/// This macro creates event handlers for agents, similar to
+/// Python's `@event` decorator.
 #[macro_export]
 macro_rules! event_handler {
-    (
-        async fn $handler_name:ident($param:ident: &$msg_type:ident, $ctx:ident: &MessageContext) -> Result<()> $body:block
-    ) => {
-        async fn $handler_name($param: &$msg_type, $ctx: &MessageContext) -> $crate::Result<Option<$crate::TypeSafeMessage>> {
-            let result: $crate::Result<()> = async move $body.await;
-            result.map(|_| None)
+    ($agent_type:ty, $handler_name:ident, $event_type:ty, $handler:expr) => {
+        impl $agent_type {
+            pub async fn $handler_name(
+                &mut self,
+                event: $event_type,
+                ctx: $crate::message_context::MessageContext,
+            ) -> Result<(), Box<dyn std::error::Error + Send>> {
+                let handler = $handler;
+                handler(self, event, ctx).await
+            }
         }
+        
+        // Register the event handler
+        $crate::base_agent::register_event_handler::<$agent_type, $event_type>(
+            stringify!($handler_name),
+            |agent, event, ctx| {
+                Box::pin(async move {
+                    if let Ok(typed_agent) = agent.downcast_mut::<$agent_type>() {
+                        if let Ok(typed_event) = serde_json::from_value::<$event_type>(event) {
+                            return typed_agent.$handler_name(typed_event, ctx).await;
+                        }
+                    }
+                    Err("Type conversion failed".into())
+                })
+            }
+        );
     };
 }
 
-/// Macro for creating RPC handlers
-///
-/// This macro provides a shorthand for creating request-response handlers,
-/// similar to Python's @rpc decorator.
-///
-/// # Example
-///
-/// ```rust
-/// use autogen_core::{rpc_handler, TypeSafeMessage, MessageContext, Result};
-///
-/// rpc_handler! {
-///     async fn process_request(req: &RequestMessage<serde_json::Value>, ctx: &MessageContext) -> Result<TypeSafeMessage> {
-///         Ok(TypeSafeMessage::text("Processed"))
-///     }
-/// }
-/// ```
+/// Macro to implement RPC handler functionality
+/// 
+/// This macro creates RPC handlers for agents, similar to
+/// Python's `@rpc` decorator.
 #[macro_export]
 macro_rules! rpc_handler {
-    (
-        async fn $handler_name:ident($param:ident: &$msg_type:ident, $ctx:ident: &MessageContext) -> Result<TypeSafeMessage> $body:block
-    ) => {
-        async fn $handler_name($param: &$msg_type, $ctx: &MessageContext) -> $crate::Result<Option<$crate::TypeSafeMessage>> {
-            let result: $crate::Result<$crate::TypeSafeMessage> = async move $body.await;
-            result.map(Some)
+    ($agent_type:ty, $handler_name:ident, $request_type:ty, $response_type:ty, $handler:expr) => {
+        impl $agent_type {
+            pub async fn $handler_name(
+                &mut self,
+                request: $request_type,
+                ctx: $crate::message_context::MessageContext,
+            ) -> Result<$response_type, Box<dyn std::error::Error + Send>> {
+                let handler = $handler;
+                handler(self, request, ctx).await
+            }
         }
+        
+        // Register the RPC handler
+        $crate::base_agent::register_rpc_handler::<$agent_type, $request_type, $response_type>(
+            stringify!($handler_name),
+            |agent, request, ctx| {
+                Box::pin(async move {
+                    if let Ok(typed_agent) = agent.downcast_mut::<$agent_type>() {
+                        if let Ok(typed_request) = serde_json::from_value::<$request_type>(request) {
+                            let response = typed_agent.$handler_name(typed_request, ctx).await?;
+                            return Ok(serde_json::to_value(response)?);
+                        }
+                    }
+                    Err("Type conversion failed".into())
+                })
+            }
+        );
     };
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{TypeSafeMessage, TextMessage};
-
-    #[test]
-    fn test_handle_messages_macro_compilation() {
-        // This test verifies that the handle_messages macro compiles correctly
-        let message = TypeSafeMessage::Text(TextMessage {
-            content: "test".to_string(),
-        });
-        let _context = crate::MessageContext::default();
-
-        // Test that the macro expands correctly
-        let result = match message {
-            TypeSafeMessage::Text(_msg) => Some("handled"),
-            _ => None,
-        };
-
-        assert_eq!(result, Some("handled"));
-    }
+/// Helper macro to define an agent with all its handlers at once
+/// 
+/// This macro provides a convenient way to define an agent with multiple
+/// message handlers, similar to how Python agents are defined with decorators.
+#[macro_export]
+macro_rules! define_agent {
+    (
+        $agent_type:ty,
+        handles: [$($handle_type:ty),*],
+        subscriptions: [$($sub_topic:expr => $sub_type:ty),*],
+        handlers: {
+            $(
+                $handler_name:ident($msg_type:ty) -> $ret_type:ty = $handler:expr
+            ),*
+        }
+    ) => {
+        // Register all handled types
+        $(
+            handles!($agent_type, $handle_type);
+        )*
+        
+        // Register all subscriptions
+        $(
+            subscription_factory!($agent_type, $sub_topic, $sub_type);
+        )*
+        
+        // Register all message handlers
+        $(
+            message_handler!($agent_type, $handler_name, $msg_type, $handler);
+        )*
+    };
 }

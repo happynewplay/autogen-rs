@@ -1,134 +1,54 @@
 [package]
 name = "autogen-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
-homepage.workspace = true
-documentation.workspace = true
-keywords.workspace = true
-categories.workspace = true
-rust-version.workspace = true
-description = "Foundational interfaces and agent runtime implementation for AutoGen"
-readme = "README.md"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Core dependencies (always included)
-serde = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true }
-async-trait = { workspace = true }
-chrono = { workspace = true, features = ["serde"] }
+# 现有依赖
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.5"
+async-trait = "0.1"
+lazy_static = "1.4.0"
+image = "0.24"
+base64 = "0.13"
+tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
+prost = "0.12"
+prost-types = "0.12"
+uuid = { version = "1.3", features = ["v4", "serde"] }
+opentelemetry = "0.22"
+opentelemetry_sdk = { version = "0.22", features = ["rt-tokio"] }
+futures = "0.3"
 
-# JSON serialization (optional)
-serde_json = { workspace = true, optional = true }
+# 新增必需依赖
+thiserror = "1.0"
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Async runtime (optional)
-tokio = { workspace = true, optional = true }
-tokio-util = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
+# 类型和配置管理
+inventory = "0.3"
+once_cell = "1.19"
+dashmap = "5.5"
 
-# Serialization formats (optional)
-prost = { workspace = true, optional = true }
-prost-types = { workspace = true, optional = true }
+# JSON Schema 和验证
+jsonschema = "0.17"
+schemars = { version = "0.8", features = ["derive"] }
+validator = { version = "0.16", features = ["derive"] }
 
-# Error handling (optional)
-anyhow = { workspace = true, optional = true }
+# 异步流处理
+async-stream = "0.3"
+pin-project = "1.1"
 
-# Tracing and telemetry (optional)
-tracing = { workspace = true, optional = true }
-opentelemetry = { workspace = true, optional = true }
-opentelemetry-semantic-conventions = { workspace = true, optional = true }
-
-# Utilities (optional)
-url = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
-dashmap = { workspace = true, optional = true }
-regex = { workspace = true, optional = true }
-
-# HTTP client (optional)
-reqwest = { workspace = true, optional = true }
-
-# Image processing (optional)
-image = { workspace = true, optional = true }
-
-# Configuration (optional)
-config = { workspace = true, optional = true }
-toml = { workspace = true, optional = true }
-
-# JSON Schema validation (optional)
-jsonschema = { version = "0.17", optional = true }
+# 宏开发支持
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+dyn-clone = "1.0.19"
 
 [dev-dependencies]
-tokio-test = { workspace = true }
-mockall = { workspace = true }
-criterion = { workspace = true }
-
-[features]
-default = ["runtime", "json", "validation"]
-
-# === Core Features ===
-# Essential runtime functionality
-runtime = ["tokio", "tokio-util", "futures", "anyhow"]
-# JSON serialization support
-json = ["serde_json"]
-# Input validation and schema checking
-validation = ["jsonschema", "regex"]
-
-# === Serialization Features ===
-# Protocol Buffer support
-protobuf = ["prost", "prost-types"]
-# All serialization formats
-all-serialization = ["json", "protobuf"]
-
-# === Networking Features ===
-# HTTP client functionality
-http = ["reqwest", "url", "bytes"]
-# Complete networking stack
-networking = ["http", "runtime"]
-
-# === Observability Features ===
-# Basic tracing support
-tracing = ["dep:tracing", "runtime"]
-# Full telemetry with OpenTelemetry
-telemetry = ["tracing", "opentelemetry", "opentelemetry-semantic-conventions", "runtime"]
-
-# === Content Processing Features ===
-# Image processing capabilities
-images = ["image"]
-# Compression support
-compression = []
-
-# === Configuration Features ===
-# Configuration file support
-config-support = ["config", "toml"]
-
-# === Development Features ===
-# Testing utilities and helpers
-testing = ["anyhow", "dashmap", "runtime"]
-
-# === Convenience Feature Combinations ===
-# Complete feature set for production use
-full = [
-    "runtime",
-    "all-serialization",
-    "networking",
-    "telemetry",
-    "images",
-    "config-support",
-    "validation",
-    "testing"
-]
-
-# Minimal feature set for embedded environments
-minimal = ["json"]
-
-# Standard feature set for most applications
-standard = ["runtime", "json", "validation", "http"]
-
-# Server-oriented feature set
-server = ["runtime", "all-serialization", "networking", "telemetry", "validation"]
-
-# Client-oriented feature set
-client = ["runtime", "json", "http", "validation"]
+tokio-test = "0.4"
+criterion = "0.5"
+proptest = "1.4"

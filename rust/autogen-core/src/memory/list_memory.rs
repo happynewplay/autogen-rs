@@ -1,144 +1,41 @@
-//! Simple chronological list-based memory implementation.
-
-use std::sync::Arc;
+use crate::model_context::chat_completion_context::ChatCompletionContext;
+use crate::cancellation_token::CancellationToken;
+use super::base_memory::{
+    Memory, MemoryContent, MemoryQueryResult, UpdateContextResult,
+};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "runtime")]
-use tokio::sync::RwLock;
-#[cfg(not(feature = "runtime"))]
-use std::sync::RwLock;
-use crate::{CancellationToken, error::Result};
-use super::base_memory::{
-    Memory, MemoryContent, MemoryQuery, MemoryQueryResult, UpdateContextResult,
-};
+use std::error::Error;
 
-/// Configuration for ListMemory component.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ListMemoryConfig {
-    /// Optional identifier for this memory instance
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// List of memory contents stored in this memory instance
     #[serde(default)]
     pub memory_contents: Vec<MemoryContent>,
 }
 
-impl Default for ListMemoryConfig {
-    fn default() -> Self {
-        Self {
-            name: None,
-            memory_contents: Vec::new(),
-        }
-    }
-}
-
-/// Simple chronological list-based memory implementation.
-///
-/// This memory implementation stores contents in a list and retrieves them in
-/// chronological order. It has an `update_context` method that updates model contexts
-/// by appending all stored memories.
-///
-/// The memory content can be directly accessed and modified through the content property,
-/// allowing external applications to manage memory contents directly.
-///
-/// # Example
-///
-/// ```rust
-/// use autogen_core::memory::{ListMemory, MemoryContent, Memory};
-/// use autogen_core::model_context::UnboundedChatCompletionContext;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Initialize memory
-/// let memory = ListMemory::new(Some("chat_history".to_string()));
-///
-/// // Add memory content
-/// let content = MemoryContent::text("User prefers formal language");
-/// memory.add(content, None).await?;
-///
-/// // Create a model context
-/// let mut model_context = UnboundedChatCompletionContext::new();
-///
-/// // Update a model context with memory
-/// memory.update_context(&mut model_context).await?;
-/// # Ok(())
-/// # }
-/// ```
-#[derive(Debug)]
 pub struct ListMemory {
-    /// Memory instance identifier
     name: String,
-    /// Contents stored in memory
-    contents: Arc<RwLock<Vec<MemoryContent>>>,
+    contents: Vec<MemoryContent>,
 }
 
 impl ListMemory {
-    /// Create a new ListMemory instance
-    ///
-    /// # Arguments
-    /// * `name` - Optional identifier for this memory instance
-    pub fn new(name: Option<String>) -> Self {
+    pub fn new(name: Option<String>, memory_contents: Option<Vec<MemoryContent>>) -> Self {
         Self {
             name: name.unwrap_or_else(|| "default_list_memory".to_string()),
-            contents: Arc::new(RwLock::new(Vec::new())),
+            contents: memory_contents.unwrap_or_default(),
         }
     }
 
-    /// Create a new ListMemory instance with initial contents
-    ///
-    /// # Arguments
-    /// * `name` - Optional identifier for this memory instance
-    /// * `memory_contents` - Initial memory contents
-    pub fn with_contents(
-        name: Option<String>,
-        memory_contents: Vec<MemoryContent>,
-    ) -> Self {
-        Self {
-            name: name.unwrap_or_else(|| "default_list_memory".to_string()),
-            contents: Arc::new(RwLock::new(memory_contents)),
-        }
-    }
-
-    /// Create a ListMemory from configuration
     pub fn from_config(config: ListMemoryConfig) -> Self {
-        Self::with_contents(config.name, config.memory_contents)
+        Self::new(config.name, Some(config.memory_contents))
     }
 
-    /// Convert to configuration
-    pub async fn to_config(&self) -> ListMemoryConfig {
-        #[cfg(feature = "runtime")]
-        let contents = self.contents.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let contents = self.contents.read().unwrap();
+    pub fn to_config(&self) -> ListMemoryConfig {
         ListMemoryConfig {
             name: Some(self.name.clone()),
-            memory_contents: contents.clone(),
+            memory_contents: self.contents.clone(),
         }
-    }
-
-    /// Get the memory instance identifier
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// Get a copy of all memory contents
-    pub async fn contents(&self) -> Vec<MemoryContent> {
-        #[cfg(feature = "runtime")]
-        {
-            self.contents.read().await.clone()
-        }
-        #[cfg(not(feature = "runtime"))]
-        {
-            self.contents.read().unwrap().clone()
-        }
-    }
-
-    /// Set the memory contents directly
-    pub async fn set_contents(&self, contents: Vec<MemoryContent>) {
-        #[cfg(feature = "runtime")]
-        let mut guard = self.contents.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut guard = self.contents.write().unwrap();
-        *guard = contents;
     }
 }
 
@@ -146,77 +43,61 @@ impl ListMemory {
 impl Memory for ListMemory {
     async fn update_context(
         &self,
-        model_context: &mut dyn crate::model_context::ChatCompletionContext,
-    ) -> Result<UpdateContextResult> {
-        #[cfg(feature = "runtime")]
-        let contents = self.contents.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let contents = self.contents.read().unwrap();
-        
-        if contents.is_empty() {
-            return Ok(UpdateContextResult::empty());
+        _model_context: &mut dyn ChatCompletionContext,
+    ) -> Result<UpdateContextResult, Box<dyn Error>> {
+        if self.contents.is_empty() {
+            return Ok(UpdateContextResult {
+                memories: MemoryQueryResult { results: vec![] },
+            });
         }
 
-        // Convert memory contents to system message and add to context
-        let memory_strings: Vec<String> = contents
-            .iter()
-            .map(|content| match &content.content {
-                super::base_memory::ContentType::Text(text) => text.clone(),
-                super::base_memory::ContentType::Json(json) => json.to_string(),
-                super::base_memory::ContentType::Binary(_) => "[Binary content]".to_string(),
-                super::base_memory::ContentType::Image { data: _, format: _, dimensions: _ } => "[Image content]".to_string(),
-            })
-            .collect();
+        // The logic to add a SystemMessage to the context will be implemented
+        // once ChatCompletionContext is fully defined.
+        // For now, we just return the memories.
 
-        let memory_context = format!("Memory contents:\n{}", memory_strings.join("\n"));
-        
-        // Add system message to context
-        let system_message = crate::models::SystemMessage {
-            content: memory_context,
-        };
-
-        model_context.add_message(crate::models::LLMMessage::System(system_message)).await?;
-
-        Ok(UpdateContextResult::new(MemoryQueryResult::new(contents.clone())))
+        Ok(UpdateContextResult {
+            memories: MemoryQueryResult {
+                results: self.contents.clone(),
+            },
+        })
     }
 
     async fn query(
         &self,
-        _query: MemoryQuery,
-        _cancellation_token: Option<CancellationToken>,
-    ) -> Result<MemoryQueryResult> {
-        // ListMemory returns all memories without any filtering
-        #[cfg(feature = "runtime")]
-        let contents = self.contents.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let contents = self.contents.read().unwrap();
-        Ok(MemoryQueryResult::new(contents.clone()))
+        _query: &str,
+        cancellation_token: Option<CancellationToken>,
+    ) -> Result<MemoryQueryResult, Box<dyn Error>> {
+        // Check for cancellation before processing
+        if let Some(token) = &cancellation_token {
+            token.check_cancelled()?;
+        }
+
+        Ok(MemoryQueryResult {
+            results: self.contents.clone(),
+        })
     }
 
-    async fn add_validated(
-        &self,
+    async fn add(
+        &mut self,
         content: MemoryContent,
-        _cancellation_token: Option<CancellationToken>,
-    ) -> Result<()> {
-        #[cfg(feature = "runtime")]
-        let mut contents = self.contents.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut contents = self.contents.write().unwrap();
-        contents.push(content);
+        cancellation_token: Option<CancellationToken>,
+    ) -> Result<(), Box<dyn Error>> {
+        // Check for cancellation before processing
+        if let Some(token) = &cancellation_token {
+            token.check_cancelled()?;
+        }
+
+        self.contents.push(content);
         Ok(())
     }
 
-    async fn clear(&self) -> Result<()> {
-        #[cfg(feature = "runtime")]
-        let mut contents = self.contents.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut contents = self.contents.write().unwrap();
-        contents.clear();
+    async fn clear(&mut self) -> Result<(), Box<dyn Error>> {
+        self.contents.clear();
         Ok(())
     }
 
-    async fn close(&self) -> Result<()> {
-        // No resources to clean up for ListMemory
+    async fn close(&mut self) -> Result<(), Box<dyn Error>> {
+        // No resources to clean up
         Ok(())
     }
 }

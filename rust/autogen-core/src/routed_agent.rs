@@ -1,295 +1,124 @@
-//! Routed Agent Implementation
-//!
-//! This module provides a routed agent system similar to Python's RoutedAgent,
-//! but leveraging Rust's type system for compile-time safety and zero-cost abstractions.
-//!
-//! The routed agent system allows defining message handlers using attribute macros
-//! and automatically routes incoming messages to the appropriate handlers based on
-//! message type and optional custom routing logic.
-
-use crate::{Agent, AgentId, AgentMetadata, MessageContext, Result, TypeSafeMessage};
+use crate::agent::Agent;
+use crate::base_agent::BaseAgent;
+use crate::message_context::MessageContext;
 use async_trait::async_trait;
+use serde_json::Value;
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// Type alias for message routing functions
-pub type MessageRouter = Arc<
-    dyn Fn(&TypeSafeMessage, &MessageContext) -> bool + Send + Sync,
+type MessageHandler = Arc<
+    dyn Fn(
+            Arc<BaseAgent>,
+            Value,
+            MessageContext,
+        ) -> Pin<Box<dyn Future<Output = Result<Value, Box<dyn Error + Send>>> + Send>>
+        + Send
+        + Sync,
 >;
 
-/// Handler metadata for message routing
-#[derive(Clone)]
-pub struct HandlerInfo {
-    /// Optional custom routing logic
-    pub router: Option<MessageRouter>,
-    /// Whether this handler is for RPC messages only
-    pub is_rpc_only: bool,
-    /// Whether this handler is for event messages only
-    pub is_event_only: bool,
-    /// Handler name for debugging
-    pub name: String,
+/// A base class for agents that route messages to handlers based on the type of the message.
+pub struct RoutedAgent {
+    base_agent: Arc<BaseAgent>,
+    handlers: HashMap<TypeId, Vec<MessageHandler>>,
 }
 
-impl HandlerInfo {
-    /// Create a new handler info
-    pub fn new(
-        name: String,
-        is_rpc_only: bool,
-        is_event_only: bool,
-        router: Option<MessageRouter>,
-    ) -> Self {
+impl Clone for RoutedAgent {
+    fn clone(&self) -> Self {
         Self {
-            router,
-            is_rpc_only,
-            is_event_only,
-            name,
-        }
-    }
-
-    /// Check if this handler can handle the given message context
-    pub fn can_handle(&self, ctx: &MessageContext) -> bool {
-        // Check RPC/event constraints
-        if self.is_rpc_only && !ctx.is_rpc {
-            return false;
-        }
-        if self.is_event_only && ctx.is_rpc {
-            return false;
-        }
-
-        true
-    }
-
-    /// Check if custom router matches
-    pub fn router_matches(&self, message: &TypeSafeMessage, ctx: &MessageContext) -> bool {
-        if let Some(router) = &self.router {
-            router(message, ctx)
-        } else {
-            true
+            base_agent: self.base_agent.clone(),
+            handlers: self.handlers.clone(),
         }
     }
 }
 
-/// Registry for message handlers
-#[derive(Default)]
-pub struct HandlerRegistry {
-    /// Handlers organized by message type
-    handlers: HashMap<&'static str, Vec<HandlerInfo>>,
-}
-
-impl HandlerRegistry {
-    /// Create a new handler registry
-    pub fn new() -> Self {
+impl RoutedAgent {
+    /// Creates a new `RoutedAgent`.
+    pub fn new(description: String) -> Self {
         Self {
+            base_agent: Arc::new(BaseAgent::new(description)),
             handlers: HashMap::new(),
         }
     }
 
-    /// Register a handler for a specific message type
-    pub fn register_handler(&mut self, message_type: &'static str, handler: HandlerInfo) {
+    /// Registers a message handler for a specific message type.
+    pub fn register_handler<T: 'static, F, Fut>(&mut self, handler: F)
+    where
+        F: Fn(Arc<BaseAgent>, T, MessageContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Value, Box<dyn Error + Send>>> + Send + 'static,
+        T: serde::de::DeserializeOwned,
+    {
+        let type_id = TypeId::of::<T>();
+        let wrapped_handler: MessageHandler = Arc::new(move |agent, msg_val, ctx| {
+            let msg: T = serde_json::from_value(msg_val).unwrap(); // Handle error properly
+            Box::pin(handler(agent, msg, ctx))
+        });
+
         self.handlers
-            .entry(message_type)
-            .or_insert_with(Vec::new)
-            .push(handler);
+            .entry(type_id)
+            .or_default()
+            .push(wrapped_handler);
     }
 
-    /// Get handlers for a specific message type
-    pub fn get_handlers(&self, message_type: &str) -> Option<&Vec<HandlerInfo>> {
-        self.handlers.get(message_type)
-    }
-
-    /// Get all registered message types
-    pub fn message_types(&self) -> Vec<&str> {
-        self.handlers.keys().copied().collect()
+    /// Called when a message is received that does not have a matching message handler.
+    pub async fn on_unhandled_message(
+        &self,
+        message: Value,
+        _ctx: MessageContext,
+    ) -> Result<Value, Box<dyn Error + Send>> {
+        println!("Unhandled message: {:?}", message);
+        Ok(Value::Null)
     }
 }
 
-/// Trait for agents that support automatic message routing
-///
-/// This trait provides a simpler approach to message routing by using
-/// method dispatch instead of complex handler registration.
 #[async_trait]
-pub trait RoutedAgent: Agent + Send + Sync {
-    /// Route a message to the appropriate handler
-    ///
-    /// This method should be implemented by agents to provide custom
-    /// message routing logic. The default implementation calls the
-    /// individual handler methods based on message type.
-    async fn route_message(
-        &mut self,
-        message: TypeSafeMessage,
-        ctx: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        match message {
-            TypeSafeMessage::Text(text_msg) => {
-                self.handle_text_message(text_msg, ctx).await
-            }
-            TypeSafeMessage::FunctionCall(func_call) => {
-                self.handle_function_call_message(func_call, ctx).await
-            }
-            TypeSafeMessage::Request(request) => {
-                self.handle_request_message(request, ctx).await
-            }
-            TypeSafeMessage::Response(response) => {
-                self.handle_response_message(response, ctx).await
-            }
-            TypeSafeMessage::Custom { message_type, payload } => {
-                self.handle_custom_message(message_type, payload, ctx).await
-            }
-            TypeSafeMessage::NoResponse(_) => {
-                // NoResponse messages don't need handling
-                Ok(None)
-            }
-        }
+impl Agent for RoutedAgent {
+    fn clone_box(&self) -> Box<dyn Agent> {
+        Box::new(self.clone())
+    }
+    fn metadata(&self) -> crate::agent_metadata::AgentMetadata {
+        self.base_agent.metadata()
     }
 
-    /// Handle text messages
-    ///
-    /// Override this method to provide custom text message handling.
-    /// The default implementation returns None.
-    async fn handle_text_message(
-        &mut self,
-        _message: crate::TextMessage,
-        _ctx: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        Ok(None)
+    fn id(&self) -> crate::agent_id::AgentId {
+        self.base_agent.id()
     }
 
-    /// Handle function call messages
-    ///
-    /// Override this method to provide custom function call handling.
-    /// The default implementation returns None.
-    async fn handle_function_call_message(
+    async fn bind_id_and_runtime(
         &mut self,
-        _message: crate::FunctionCall,
-        _ctx: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        Ok(None)
+        _id: crate::agent_id::AgentId,
+        _runtime: &dyn crate::agent_runtime::AgentRuntime,
+    ) -> Result<(), Box<dyn Error>> {
+        Ok(())
     }
 
-    /// Handle request messages
-    ///
-    /// Override this method to provide custom request handling.
-    /// The default implementation returns None.
-    async fn handle_request_message(
+    async fn on_message(
         &mut self,
-        _message: crate::RequestMessage<serde_json::Value>,
-        _ctx: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        Ok(None)
+        message: Value,
+        ctx: MessageContext,
+    ) -> Result<Value, Box<dyn Error + Send>> {
+        self.on_unhandled_message(message, ctx).await
     }
 
-    /// Handle response messages
-    ///
-    /// Override this method to provide custom response handling.
-    /// The default implementation returns None.
-    async fn handle_response_message(
-        &mut self,
-        _message: crate::ResponseMessage<serde_json::Value>,
-        _ctx: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        Ok(None)
+    async fn save_state(&self) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        let state = self.base_agent.save_state()?;
+        // Convert single Value to HashMap format expected by Agent trait
+        let mut state_map = HashMap::new();
+        state_map.insert("base_state".to_string(), state);
+        Ok(state_map)
     }
 
-    /// Handle custom messages
-    ///
-    /// Override this method to provide custom message handling.
-    /// The default implementation returns None.
-    async fn handle_custom_message(
-        &mut self,
-        _message_type: String,
-        _payload: serde_json::Value,
-        _ctx: &MessageContext,
-    ) -> Result<Option<TypeSafeMessage>> {
-        Ok(None)
+    async fn load_state(&mut self, _state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
+        // Note: Cannot modify Arc<BaseAgent> directly
+        // In a full implementation, you would need to redesign this to use Arc<Mutex<BaseAgent>>
+        // or implement a different state management approach
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), Box<dyn Error>> {
+        Ok(())
     }
 }
-
-
-
-/// Macro to create a simple routed agent implementation
-///
-/// This macro provides a convenient way to create a routed agent that
-/// automatically implements the Agent trait and delegates to RoutedAgent.
-#[macro_export]
-macro_rules! simple_routed_agent {
-    (
-        struct $agent_name:ident {
-            id: AgentId,
-            $($field:ident: $field_type:ty,)*
-        }
-    ) => {
-        pub struct $agent_name {
-            id: AgentId,
-            $($field: $field_type,)*
-        }
-
-        impl $agent_name {
-            pub fn new(id: AgentId $(, $field: $field_type)*) -> Self {
-                Self {
-                    id,
-                    $($field,)*
-                }
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl Agent for $agent_name {
-            fn id(&self) -> &AgentId {
-                &self.id
-            }
-
-            async fn handle_message(
-                &mut self,
-                message: TypeSafeMessage,
-                context: &MessageContext,
-            ) -> Result<Option<TypeSafeMessage>> {
-                self.route_message(message, context).await
-            }
-        }
-
-        // Note: RoutedAgent implementation should be provided by the user
-    };
-}
-
-/// Macro to implement message handlers for a routed agent
-///
-/// This macro provides a convenient way to implement multiple message handlers
-/// for a routed agent, similar to Python's @event and @rpc decorators.
-#[macro_export]
-macro_rules! impl_message_handlers {
-    (
-        impl $agent_type:ty {
-            $(
-                $(#[event])?
-                $(#[rpc])?
-                async fn $handler_name:ident(&mut self, $param:ident: $msg_type:ty, $ctx:ident: &MessageContext) -> Result<$return_type:ty> $body:block
-            )*
-        }
-    ) => {
-        #[async_trait::async_trait]
-        impl RoutedAgent for $agent_type {
-            $(
-                async fn $handler_name(&mut self, $param: $msg_type, $ctx: &MessageContext) -> Result<Option<TypeSafeMessage>> {
-                    let result: $return_type = $body;
-                    // Convert result to Option<TypeSafeMessage> based on return type
-                    impl_message_handlers!(@convert_result result)
-                }
-            )*
-        }
-    };
-
-    // Helper to convert different return types to Option<TypeSafeMessage>
-    (@convert_result $result:expr) => {
-        match $result {
-            Ok(Some(msg)) => Ok(Some(msg)),
-            Ok(None) => Ok(None),
-            Ok(()) => Ok(None),
-            Err(e) => Err(e),
-        }
-    };
-}
-
-

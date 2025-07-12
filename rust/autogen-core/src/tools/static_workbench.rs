@@ -1,390 +1,100 @@
-//! Static workbench implementation with a fixed set of tools.
-
-use std::collections::HashMap;
-use std::sync::Arc;
+use super::base::{Tool, ToolSchema};
+use super::workbench::{ResultContent, TextResultContent, ToolResult, Workbench};
 use async_trait::async_trait;
-#[cfg(feature = "runtime")]
-use futures::Stream;
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "runtime")]
-use tokio::sync::RwLock;
-#[cfg(not(feature = "runtime"))]
-use std::sync::RwLock;
-use crate::{CancellationToken, error::Result};
-use super::{
-    base_tool::{Tool, ToolSchema},
-    workbench::{Workbench, WorkbenchResult, WorkbenchStreamItem},
-};
-#[cfg(feature = "runtime")]
-use super::workbench::StreamWorkbench;
+use serde_json::Value;
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::Arc;
 
-/// Configuration for StaticWorkbench
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StaticWorkbenchConfig {
-    /// List of tools in the workbench
+    // In Rust, we can't directly serialize a trait object.
+    // We would typically use some form of component model or configuration
+    // to reconstruct the tools. For now, this is a placeholder.
     #[serde(default)]
-    pub tools: Vec<String>, // In a real implementation, this would be ComponentModel
+    pub tools: Vec<Value>,
 }
 
-impl Default for StaticWorkbenchConfig {
-    fn default() -> Self {
-        Self {
-            tools: Vec::new(),
-        }
-    }
-}
-
-/// State for StaticWorkbench
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StaticWorkbenchState {
-    /// The type identifier
-    #[serde(rename = "type")]
-    pub state_type: String,
-    /// Tool states
-    #[serde(default)]
-    pub tools: HashMap<String, HashMap<String, serde_json::Value>>,
+    pub tools: HashMap<String, Value>,
 }
 
-impl Default for StaticWorkbenchState {
-    fn default() -> Self {
-        Self {
-            state_type: "StaticWorkbenchState".to_string(),
-            tools: HashMap::new(),
-        }
-    }
-}
-
-/// A workbench that provides a static set of tools that do not change after
-/// each tool execution.
-///
-/// This workbench is suitable for scenarios where you have a fixed set of tools
-/// that don't need to be dynamically added or removed during execution.
-///
-/// # Example
-///
-/// ```rust
-/// use autogen_core::tools::{StaticWorkbench, FunctionTool, Workbench, ParametersSchema, Tool};
-/// use std::collections::HashMap;
-/// use serde_json::json;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// // Create some tools
-/// let add_tool = FunctionTool::new(
-///     "add".to_string(),
-///     "Add two numbers".to_string(),
-///     Some(ParametersSchema {
-///         schema_type: "object".to_string(),
-///         properties: Some({
-///             let mut props = HashMap::new();
-///             props.insert("a".to_string(), json!({"type": "number"}));
-///             props.insert("b".to_string(), json!({"type": "number"}));
-///             props
-///         }),
-///         required: Some(vec!["a".to_string(), "b".to_string()]),
-///     }),
-///     Box::new(|args, _token| {
-///         Box::pin(async move {
-///             let a = args.get("a").and_then(|v| v.as_f64()).unwrap_or(0.0);
-///             let b = args.get("b").and_then(|v| v.as_f64()).unwrap_or(0.0);
-///             Ok(json!(a + b))
-///         })
-///     }),
-/// );
-///
-/// // Create workbench with tools
-/// let tools: Vec<Box<dyn Tool>> = vec![Box::new(add_tool)];
-/// let mut workbench = StaticWorkbench::new(tools);
-///
-/// // Start the workbench
-/// workbench.start().await?;
-///
-/// // List available tools
-/// let tool_schemas = workbench.list_tools().await?;
-/// assert_eq!(tool_schemas.len(), 1);
-/// assert_eq!(tool_schemas[0].name, "add");
-/// # Ok(())
-/// # }
-/// ```
 pub struct StaticWorkbench {
-    /// The tools in this workbench
-    tools: Arc<RwLock<Vec<Box<dyn Tool>>>>,
-    /// Whether the workbench is started
-    started: Arc<RwLock<bool>>,
+    tools: Vec<Arc<dyn Tool + Send + Sync>>,
 }
 
 impl StaticWorkbench {
-    /// Create a new static workbench with the given tools
-    ///
-    /// # Arguments
-    /// * `tools` - A vector of tools to include in the workbench
-    pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
-        Self {
-            tools: Arc::new(RwLock::new(tools)),
-            started: Arc::new(RwLock::new(false)),
-        }
-    }
-
-    /// Create an empty static workbench
-    pub fn empty() -> Self {
-        Self::new(Vec::new())
-    }
-
-    /// Add a tool to the workbench
-    ///
-    /// # Arguments
-    /// * `tool` - The tool to add
-    pub async fn add_tool(&self, tool: Box<dyn Tool>) {
-        #[cfg(feature = "runtime")]
-        let mut tools = self.tools.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut tools = self.tools.write().unwrap();
-        tools.push(tool);
-    }
-
-    /// Remove a tool from the workbench by name
-    ///
-    /// # Arguments
-    /// * `name` - The name of the tool to remove
-    ///
-    /// # Returns
-    /// True if the tool was found and removed, false otherwise
-    pub async fn remove_tool(&self, name: &str) -> bool {
-        #[cfg(feature = "runtime")]
-        let mut tools = self.tools.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut tools = self.tools.write().unwrap();
-        if let Some(pos) = tools.iter().position(|tool| tool.name() == name) {
-            tools.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Get the number of tools in the workbench
-    pub async fn tool_count(&self) -> usize {
-        #[cfg(feature = "runtime")]
-        let tools = self.tools.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let tools = self.tools.read().unwrap();
-        tools.len()
-    }
-
-    /// Check if the workbench is started
-    pub async fn is_started(&self) -> bool {
-        #[cfg(feature = "runtime")]
-        {
-            *self.started.read().await
-        }
-        #[cfg(not(feature = "runtime"))]
-        {
-            *self.started.read().unwrap()
-        }
-    }
-
-    /// Create from configuration
-    pub fn from_config(_config: StaticWorkbenchConfig) -> Self {
-        // In a real implementation, this would load tools from the configuration
-        Self::empty()
-    }
-
-    /// Convert to configuration
-    pub async fn to_config(&self) -> StaticWorkbenchConfig {
-        #[cfg(feature = "runtime")]
-        let tools = self.tools.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let tools = self.tools.read().unwrap();
-        StaticWorkbenchConfig {
-            tools: tools.iter().map(|tool| tool.name().to_string()).collect(),
-        }
+    pub fn new(tools: Vec<Arc<dyn Tool + Send + Sync>>) -> Self {
+        Self { tools }
     }
 }
 
 #[async_trait]
 impl Workbench for StaticWorkbench {
-    async fn list_tools(&self) -> Result<Vec<ToolSchema>> {
-        #[cfg(feature = "runtime")]
-        let tools = self.tools.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let tools = self.tools.read().unwrap();
-        Ok(tools.iter().map(|tool| tool.schema()).collect())
+    async fn list_tools(&self) -> Result<Vec<ToolSchema>, Box<dyn Error + Send + Sync>> {
+        Ok(self.tools.iter().map(|t| t.schema().clone()).collect())
     }
 
     async fn call_tool(
         &self,
         name: &str,
-        arguments: Option<&HashMap<String, serde_json::Value>>,
-        cancellation_token: Option<CancellationToken>,
-        call_id: Option<String>,
-    ) -> Result<WorkbenchResult> {
-        #[cfg(feature = "runtime")]
-        let tools = self.tools.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let tools = self.tools.read().unwrap();
-        
-        // Find the tool by name
-        let tool = tools.iter()
-            .find(|tool| tool.name() == name)
-            .ok_or_else(|| crate::error::AutoGenError::other(format!(
-                "Tool '{}' not found. Available tools: {:?}",
-                name,
-                tools.iter().map(|t| t.name().to_string()).collect::<Vec<_>>()
-            )))?;
+        arguments: &Value,
+    ) -> Result<ToolResult, Box<dyn Error + Send + Sync>> {
+        let tool = self.tools.iter().find(|t| t.name() == name);
 
-        // Execute the tool
-        let args = arguments.cloned().unwrap_or_default();
-        match tool.run_json(&args, cancellation_token, call_id).await {
-            Ok(result) => {
-                let content = tool.return_value_as_string(&result);
-                Ok(WorkbenchResult::text(name.to_string(), content))
-            }
-            Err(e) => {
-                Ok(WorkbenchResult::error(name.to_string(), e.to_string()))
-            }
-        }
-    }
-
-    async fn start(&mut self) -> Result<()> {
-        #[cfg(feature = "runtime")]
-        let mut started = self.started.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut started = self.started.write().unwrap();
-        *started = true;
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        #[cfg(feature = "runtime")]
-        let mut started = self.started.write().await;
-        #[cfg(not(feature = "runtime"))]
-        let mut started = self.started.write().unwrap();
-        *started = false;
-        Ok(())
-    }
-
-    async fn reset(&mut self) -> Result<()> {
-        // For static workbench, reset just means ensuring it's started
-        self.start().await
-    }
-
-    async fn save_state(&self) -> Result<HashMap<String, serde_json::Value>> {
-        #[cfg(feature = "runtime")]
-        let tools = self.tools.read().await;
-        #[cfg(not(feature = "runtime"))]
-        let tools = self.tools.read().unwrap();
-        let mut tool_states = HashMap::new();
-        
-        for tool in tools.iter() {
-            let state = tool.save_state_json().await?;
-            if !state.is_empty() {
-                tool_states.insert(tool.name().to_string(), state);
-            }
-        }
-
-        let state = StaticWorkbenchState {
-            state_type: "StaticWorkbenchState".to_string(),
-            tools: tool_states,
-        };
-
-        let mut result = HashMap::new();
-        result.insert("workbench_state".to_string(), serde_json::to_value(state)?);
-        Ok(result)
-    }
-
-    async fn load_state(&mut self, state: &HashMap<String, serde_json::Value>) -> Result<()> {
-        if let Some(state_value) = state.get("workbench_state") {
-            let workbench_state: StaticWorkbenchState = serde_json::from_value(state_value.clone())?;
-            
-            #[cfg(feature = "runtime")]
-            let tools = self.tools.read().await;
-            #[cfg(not(feature = "runtime"))]
-            let tools = self.tools.read().unwrap();
-            for tool in tools.iter() {
-                if let Some(tool_state) = workbench_state.tools.get(tool.name()) {
-                    tool.load_state_json(tool_state).await?;
+        if let Some(tool) = tool {
+            match tool.run(arguments).await {
+                Ok(result) => {
+                    let result_str = tool.return_value_as_string(&result);
+                    Ok(ToolResult {
+                        name: name.to_string(),
+                        result: vec![ResultContent::TextResultContent(TextResultContent {
+                            content: result_str,
+                        })],
+                        is_error: false,
+                    })
                 }
+                Err(e) => Ok(ToolResult {
+                    name: name.to_string(),
+                    result: vec![ResultContent::TextResultContent(TextResultContent {
+                        content: e.to_string(),
+                    })],
+                    is_error: true,
+                }),
             }
+        } else {
+            Ok(ToolResult {
+                name: name.to_string(),
+                result: vec![ResultContent::TextResultContent(TextResultContent {
+                    content: format!("Tool {} not found.", name),
+                })],
+                is_error: true,
+            })
         }
+    }
+
+    async fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         Ok(())
     }
-}
 
-/// A static workbench that supports streaming tool execution.
-pub struct StaticStreamWorkbench {
-    base: StaticWorkbench,
-}
-
-impl StaticStreamWorkbench {
-    /// Create a new static stream workbench
-    pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
-        Self {
-            base: StaticWorkbench::new(tools),
-        }
+    async fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
     }
 
-    /// Create an empty static stream workbench
-    pub fn empty() -> Self {
-        Self {
-            base: StaticWorkbench::empty(),
-        }
-    }
-}
-
-#[async_trait]
-impl Workbench for StaticStreamWorkbench {
-    async fn list_tools(&self) -> Result<Vec<ToolSchema>> {
-        self.base.list_tools().await
+    async fn reset(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
     }
 
-    async fn call_tool(
-        &self,
-        name: &str,
-        arguments: Option<&HashMap<String, serde_json::Value>>,
-        cancellation_token: Option<CancellationToken>,
-        call_id: Option<String>,
-    ) -> Result<WorkbenchResult> {
-        self.base.call_tool(name, arguments, cancellation_token, call_id).await
+    async fn save_state(&self) -> Result<HashMap<String, Value>, Box<dyn Error + Send + Sync>> {
+        // State saving for tools is complex and depends on the tool's implementation.
+        // For now, returning an empty state.
+        Ok(HashMap::new())
     }
 
-    async fn start(&mut self) -> Result<()> {
-        self.base.start().await
-    }
-
-    async fn stop(&mut self) -> Result<()> {
-        self.base.stop().await
-    }
-
-    async fn reset(&mut self) -> Result<()> {
-        self.base.reset().await
-    }
-
-    async fn save_state(&self) -> Result<HashMap<String, serde_json::Value>> {
-        self.base.save_state().await
-    }
-
-    async fn load_state(&mut self, state: &HashMap<String, serde_json::Value>) -> Result<()> {
-        self.base.load_state(state).await
-    }
-}
-
-#[cfg(feature = "runtime")]
-#[async_trait]
-impl StreamWorkbench for StaticStreamWorkbench {
-    async fn call_tool_stream(
-        &self,
-        name: &str,
-        arguments: Option<&HashMap<String, serde_json::Value>>,
-        cancellation_token: Option<CancellationToken>,
-        call_id: Option<String>,
-    ) -> Result<Box<dyn Stream<Item = Result<WorkbenchStreamItem>> + Send + Unpin>> {
-        // For now, just call the regular tool and return the result as a stream
-        // In a real implementation, this would check if the tool supports streaming
-        let result = self.call_tool(name, arguments, cancellation_token, call_id).await?;
-
-        use futures::stream;
-        let stream = stream::once(async move {
-            Ok(WorkbenchStreamItem::Final(result))
-        });
-        Ok(Box::new(Box::pin(stream)))
+    async fn load_state(&mut self, _state: &HashMap<String, Value>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // State loading for tools is complex.
+        Ok(())
     }
 }
