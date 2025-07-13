@@ -32,12 +32,12 @@ pub struct SubscriptionStats {
 /// Extension methods for the simplified SubscriptionManager
 impl SubscriptionManager {
     /// Add a type subscription (convenience method)
-    pub async fn add_type_subscription(&mut self, subscription: TypeSubscription) -> Result<(), String> {
+    pub async fn add_type_subscription(&mut self, subscription: TypeSubscription) -> Result<(), SubscriptionError> {
         self.add_subscription(Box::new(subscription)).await
     }
 
     /// Add a type prefix subscription (convenience method)
-    pub async fn add_prefix_subscription(&mut self, subscription: TypePrefixSubscription) -> Result<(), String> {
+    pub async fn add_prefix_subscription(&mut self, subscription: TypePrefixSubscription) -> Result<(), SubscriptionError> {
         self.add_subscription(Box::new(subscription)).await
     }
 
@@ -64,17 +64,17 @@ pub fn get_global_subscription_manager() -> Arc<Mutex<SubscriptionManager>> {
 }
 
 /// Convenience functions for global subscription management
-pub async fn add_global_subscription(subscription: Box<dyn Subscription>) -> Result<(), String> {
+pub async fn add_global_subscription(subscription: Box<dyn Subscription>) -> Result<(), SubscriptionError> {
     let mut manager = GLOBAL_SUBSCRIPTION_MANAGER.lock().unwrap();
     manager.add_subscription(subscription).await
 }
 
-pub async fn add_global_type_subscription(subscription: TypeSubscription) -> Result<(), String> {
+pub async fn add_global_type_subscription(subscription: TypeSubscription) -> Result<(), SubscriptionError> {
     let mut manager = GLOBAL_SUBSCRIPTION_MANAGER.lock().unwrap();
     manager.add_type_subscription(subscription).await
 }
 
-pub async fn add_global_prefix_subscription(subscription: TypePrefixSubscription) -> Result<(), String> {
+pub async fn add_global_prefix_subscription(subscription: TypePrefixSubscription) -> Result<(), SubscriptionError> {
     let mut manager = GLOBAL_SUBSCRIPTION_MANAGER.lock().unwrap();
     manager.add_prefix_subscription(subscription).await
 }

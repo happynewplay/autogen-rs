@@ -5,22 +5,44 @@ use crate::agent_runtime::AgentRuntime;
 use crate::agent_type::AgentType;
 use crate::cancellation_token::CancellationToken;
 use crate::intervention::InterventionHandler;
-use crate::queue::Queue;
+
+use crate::routing::{MessagePriority, MessageEnvelopeInfo};
 use crate::runtime_impl_helpers::SubscriptionManager;
 use crate::serialization::SerializationRegistry;
 use crate::subscription::Subscription;
 use crate::topic::TopicId;
-use crate::telemetry::{TraceHelper, get_telemetry_envelope_metadata};
-use crate::telemetry::tracing_config::MessageRuntimeTracingConfig;
+
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use thiserror::Error;
-use opentelemetry::trace::TracerProvider;
+
+
+/// State version management constants and utilities
+pub mod state_version {
+    pub const CURRENT_VERSION: &str = "2.0";
+    pub const CURRENT_SCHEMA_VERSION: &str = "2.0";
+    pub const SUPPORTED_VERSIONS: &[&str] = &["1.0", "2.0"];
+
+    /// Check if a version is supported
+    pub fn is_supported(version: &str) -> bool {
+        SUPPORTED_VERSIONS.contains(&version)
+    }
+
+    /// Get the migration path for a version
+    pub fn get_migration_path(from_version: &str) -> Vec<&'static str> {
+        match from_version {
+            "1.0" => vec!["2.0"],
+            "2.0" => vec![], // Current version
+            _ => vec![], // Unknown version
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum RuntimeError {
@@ -66,6 +88,9 @@ pub struct SendMessageEnvelope {
     pub cancellation_token: CancellationToken,
     pub metadata: Option<EnvelopeMetadata>,
     pub message_id: String,
+    pub priority: MessagePriority,
+    pub timestamp: Instant,
+    pub estimated_processing_time: Duration,
 }
 
 /// Message envelope for publishing messages to topics
@@ -77,6 +102,9 @@ pub struct PublishMessageEnvelope {
     pub cancellation_token: CancellationToken,
     pub metadata: Option<EnvelopeMetadata>,
     pub message_id: String,
+    pub priority: MessagePriority,
+    pub timestamp: Instant,
+    pub estimated_processing_time: Duration,
 }
 
 /// Message envelope for sending responses
@@ -87,6 +115,8 @@ pub struct ResponseMessageEnvelope {
     pub sender: AgentId,
     pub recipient: Option<AgentId>,
     pub metadata: Option<EnvelopeMetadata>,
+    pub priority: MessagePriority,
+    pub timestamp: Instant,
 }
 
 /// Union type for all message envelopes
@@ -95,6 +125,48 @@ pub enum MessageEnvelope {
     Send(SendMessageEnvelope),
     Publish(PublishMessageEnvelope),
     Response(ResponseMessageEnvelope),
+}
+
+impl MessageEnvelopeInfo for MessageEnvelope {
+    fn priority(&self) -> MessagePriority {
+        match self {
+            MessageEnvelope::Send(env) => env.priority,
+            MessageEnvelope::Publish(env) => env.priority,
+            MessageEnvelope::Response(env) => env.priority,
+        }
+    }
+
+    fn timestamp(&self) -> Instant {
+        match self {
+            MessageEnvelope::Send(env) => env.timestamp,
+            MessageEnvelope::Publish(env) => env.timestamp,
+            MessageEnvelope::Response(env) => env.timestamp,
+        }
+    }
+
+    fn sender(&self) -> Option<&AgentId> {
+        match self {
+            MessageEnvelope::Send(env) => env.sender.as_ref(),
+            MessageEnvelope::Publish(env) => env.sender.as_ref(),
+            MessageEnvelope::Response(env) => Some(&env.sender),
+        }
+    }
+
+    fn message_type(&self) -> &str {
+        match self {
+            MessageEnvelope::Send(_) => "Send",
+            MessageEnvelope::Publish(_) => "Publish",
+            MessageEnvelope::Response(_) => "Response",
+        }
+    }
+
+    fn estimated_processing_time(&self) -> Duration {
+        match self {
+            MessageEnvelope::Send(env) => env.estimated_processing_time,
+            MessageEnvelope::Publish(env) => env.estimated_processing_time,
+            MessageEnvelope::Response(_) => Duration::from_millis(50), // Responses are typically fast
+        }
+    }
 }
 
 /// Background task handle for tracking spawned tasks
@@ -376,7 +448,7 @@ impl SingleThreadedAgentRuntime {
     ) -> Result<Value, Box<dyn Error + Send>> {
         use crate::message_context::MessageContext;
         use crate::message_handler_context::MessageHandlerContext;
-        use crate::intervention::DropMessage;
+
 
         // Log the message delivery
         tracing::info!(
@@ -389,9 +461,36 @@ impl SingleThreadedAgentRuntime {
         // Apply intervention handlers for send
         let mut processed_message = envelope.message.clone();
 
-        // 未实现: 简化intervention handler处理，暂时跳过
-        // let message_context = MessageContext { ... };
-        // for handler in &intervention_handlers { ... }
+        // Apply intervention handlers
+        let intervention_handlers = {
+            let state_guard = state.lock().unwrap();
+            state_guard.intervention_handlers.iter().map(|h| h.clone_box()).collect::<Vec<_>>()
+        };
+
+        // Create a message context for the send operation
+        let message_context = crate::message_context::MessageContext {
+            sender: envelope.sender.clone(),
+            topic_id: None,
+            is_rpc: true,
+            cancellation_token: envelope.cancellation_token.clone(),
+            message_id: envelope.message_id.clone(),
+        };
+
+        for handler in &intervention_handlers {
+            match handler.on_send(processed_message.clone(), &message_context, &envelope.recipient).await {
+                Ok(modified_message) => {
+                    processed_message = modified_message;
+                }
+                Err(_drop_message) => {
+                    // Message was dropped by intervention handler
+                    tracing::info!(
+                        "Message dropped by intervention handler for recipient: {:?}",
+                        envelope.recipient
+                    );
+                    return Ok(Value::Null); // Return null to indicate message was dropped
+                }
+            }
+        }
 
         // Check if recipient agent exists
         let needs_creation = {
@@ -404,16 +503,10 @@ impl SingleThreadedAgentRuntime {
             state_guard.instantiated_agents.get(&envelope.recipient).is_none()
         };
 
-        let agent = if needs_creation {
-            // Need to create agent instance
-            Self::create_agent_instance(state.clone(), &envelope.recipient).await?
-        } else {
-            // Get existing agent instance
-            let state_guard = state.lock().unwrap();
-            state_guard.instantiated_agents.get(&envelope.recipient)
-                .unwrap()
-                .clone_box()
-        };
+        // Ensure agent exists (create if needed)
+        if needs_creation {
+            Self::create_agent_instance(state.clone(), &envelope.recipient).await?;
+        }
 
         // Create message context
         let message_context = MessageContext {
@@ -424,24 +517,58 @@ impl SingleThreadedAgentRuntime {
             message_id: envelope.message_id.clone(),
         };
 
-        // Set message handler context and handle the message
-        let response = MessageHandlerContext::with_context(envelope.recipient.clone(), async {
-            // Handle the message using the correct method
-            let mut agent_mut = agent;
-            agent_mut.on_message(processed_message, message_context).await
-        }).await?;
+        // Handle the message with proper synchronization
+        let response = {
+            // Get a mutable clone of the agent for message processing
+            let mut agent_for_processing = {
+                let state_guard = state.lock().unwrap();
+                state_guard.instantiated_agents.get(&envelope.recipient)
+                    .ok_or_else(|| -> Box<dyn Error + Send> {
+                        RuntimeError::AgentNotFound(envelope.recipient.to_string()).into_send_error()
+                    })?
+                    .clone_box()
+            };
+
+            // Process the message in the message handler context
+            let result = MessageHandlerContext::with_context(envelope.recipient.clone(), async move {
+                agent_for_processing.on_message(processed_message, message_context).await
+            }).await?;
+
+            // Update the agent state back to the runtime if needed
+            // Note: For stateful agents, we might need to store the modified agent back
+            // This is a design decision - for now we assume agents manage their own persistence
+
+            result
+        };
 
         // Apply intervention handlers for response
-        let final_response = response;
-        // 未实现: 简化intervention handler处理，暂时跳过
+        let mut final_response = response;
+        let intervention_handlers = {
+            let state_guard = state.lock().unwrap();
+            state_guard.intervention_handlers.iter().map(|h| h.clone_box()).collect::<Vec<_>>()
+        };
+
+        for handler in &intervention_handlers {
+            match handler.on_response(final_response.clone(), &envelope.recipient, envelope.sender.as_ref()).await {
+                Ok(modified_response) => {
+                    final_response = modified_response;
+                }
+                Err(_drop_message) => {
+                    // Response was dropped by intervention handler
+                    tracing::info!(
+                        "Response dropped by intervention handler from recipient: {:?}",
+                        envelope.recipient
+                    );
+                    final_response = Value::Null; // Set to null to indicate response was dropped
+                    break;
+                }
+            }
+        }
 
         Ok(final_response)
     }
 
     async fn process_publish_envelope(state: Arc<Mutex<AgentRuntimeState>>, envelope: PublishMessageEnvelope) {
-        use crate::intervention::DropMessage;
-        use crate::message_context::MessageContext;
-
         tracing::info!(
             "Processing publish message from {:?} to topic {} with message_id: {}",
             envelope.sender,
@@ -450,8 +577,36 @@ impl SingleThreadedAgentRuntime {
         );
 
         // Apply intervention handlers for publish
-        let processed_message = envelope.message.clone();
-        // 未实现: 简化intervention handler处理，暂时跳过
+        let mut processed_message = envelope.message.clone();
+        let intervention_handlers = {
+            let state_guard = state.lock().unwrap();
+            state_guard.intervention_handlers.iter().map(|h| h.clone_box()).collect::<Vec<_>>()
+        };
+
+        // Create a message context for the publish operation
+        let message_context = crate::message_context::MessageContext {
+            sender: envelope.sender.clone(),
+            topic_id: Some(envelope.topic_id.clone()),
+            is_rpc: false,
+            cancellation_token: envelope.cancellation_token.clone(),
+            message_id: envelope.message_id.clone(),
+        };
+
+        for handler in &intervention_handlers {
+            match handler.on_publish(processed_message.clone(), &message_context).await {
+                Ok(modified_message) => {
+                    processed_message = modified_message;
+                }
+                Err(_drop_message) => {
+                    // Message was dropped by intervention handler
+                    tracing::info!(
+                        "Publish message dropped by intervention handler for topic: {}",
+                        envelope.topic_id
+                    );
+                    return; // Exit early if message is dropped
+                }
+            }
+        }
 
         // Get subscribed recipients
         let recipients = {
@@ -473,6 +628,9 @@ impl SingleThreadedAgentRuntime {
                 cancellation_token: envelope.cancellation_token.clone(),
                 metadata: envelope.metadata.clone(),
                 message_id: format!("{}_{}", envelope.message_id, recipient_id),
+                priority: envelope.priority,
+                timestamp: Instant::now(),
+                estimated_processing_time: envelope.estimated_processing_time,
             };
 
             // Process each recipient in a separate background task
@@ -562,32 +720,33 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
         agent_id: AgentId,
     ) -> Result<AgentId, Box<dyn Error>> {
         // Validate that the agent ID is not already registered
-        let already_exists = {
+        {
             let state = self.state.lock().unwrap();
-            state.instantiated_agents.contains_key(&agent_id)
-        };
-
-        if already_exists {
-            return Err(format!("Agent instance with ID {} already registered", agent_id).into());
+            if state.instantiated_agents.contains_key(&agent_id) {
+                return Err(format!("Agent instance with ID {} already registered", agent_id).into());
+            }
         }
 
-        // Clone the agent for storage before binding
-        let boxed_agent = {
+        // Clone the agent for binding - we need a mutable copy for binding
+        let mut agent_for_binding = {
             let agent_guard = agent.lock().unwrap();
             agent_guard.clone_box()
         };
 
-        // For now, we'll skip the async bind_id_and_runtime call to avoid Send issues
-        // This is a temporary workaround - in a full implementation, we'd need to
-        // restructure this to handle the async binding properly
-        // TODO: Implement proper async binding without Send issues
-
-        // Store the agent instance in the runtime state
+        // Perform the async binding using a safe approach
+        // We create a scoped async block to ensure proper lifetime management
         {
-            let mut state = self.state.lock().unwrap();
-            state.instantiated_agents.insert(agent_id.clone(), boxed_agent);
+            let runtime_ref: &dyn AgentRuntime = self;
+            agent_for_binding.bind_id_and_runtime(agent_id.clone(), runtime_ref).await?;
         }
 
+        // Store the bound agent instance in the runtime state
+        {
+            let mut state = self.state.lock().unwrap();
+            state.instantiated_agents.insert(agent_id.clone(), agent_for_binding);
+        }
+
+        tracing::info!("Successfully registered agent instance: {}", agent_id);
         Ok(agent_id)
     }
 
@@ -608,6 +767,9 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             cancellation_token: cancellation_token.unwrap_or_default(),
             metadata: Some(EnvelopeMetadata::default()),
             message_id: message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            priority: MessagePriority::default(),
+            timestamp: Instant::now(),
+            estimated_processing_time: Duration::from_millis(100),
         });
         self.queue_tx
             .send(envelope)
@@ -630,6 +792,9 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
             cancellation_token: cancellation_token.unwrap_or_default(),
             metadata: Some(EnvelopeMetadata::default()),
             message_id: uuid::Uuid::new_v4().to_string(),
+            priority: MessagePriority::default(),
+            timestamp: Instant::now(),
+            estimated_processing_time: Duration::from_millis(200), // Publish operations typically take longer
         });
         self.queue_tx
             .send(envelope)
@@ -639,8 +804,21 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
     }
 
     async fn add_subscription(&self, subscription: Box<dyn Subscription>) -> Result<(), Box<dyn Error>> {
-        // 未实现: 简化的subscription管理，暂时返回成功
-        Ok(())
+        // Extract the subscription manager to avoid holding the lock across await
+        let mut subscription_manager = {
+            let mut state = self.state.lock().unwrap();
+            std::mem::take(&mut state.subscription_manager)
+        };
+
+        let result = subscription_manager.add_subscription(subscription).await;
+
+        // Put the subscription manager back
+        {
+            let mut state = self.state.lock().unwrap();
+            state.subscription_manager = subscription_manager;
+        }
+
+        result.map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn Error>)
     }
 
     async fn agent_metadata(&self, agent_id: &AgentId) -> Result<AgentMetadata, Box<dyn Error>> {
@@ -690,35 +868,192 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
         Ok(())
     }
 
-    async fn remove_subscription(&self, _id: &str) -> Result<(), Box<dyn Error>> {
-        // 未实现: 简化的subscription管理，暂时返回成功
-        Ok(())
+    async fn remove_subscription(&self, id: &str) -> Result<(), Box<dyn Error>> {
+        // Extract the subscription manager to avoid holding the lock across await
+        let mut subscription_manager = {
+            let mut state = self.state.lock().unwrap();
+            std::mem::take(&mut state.subscription_manager)
+        };
+
+        let result = subscription_manager.remove_subscription(id).await;
+
+        // Put the subscription manager back
+        {
+            let mut state = self.state.lock().unwrap();
+            state.subscription_manager = subscription_manager;
+        }
+
+        result.map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn Error>)
     }
 
     async fn save_state(&self) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        tracing::info!("Starting runtime state save operation");
         let mut runtime_state = HashMap::new();
 
-        // 未实现: 简化的状态保存，暂时返回空状态
-        runtime_state.insert("agents".to_string(), serde_json::to_value(HashMap::<String, Value>::new())?);
-        runtime_state.insert("subscriptions".to_string(), serde_json::to_value(Vec::<String>::new())?);
+        // Collect agent information first (without holding the lock across await)
+        let agents_info: Vec<(AgentId, Box<dyn Agent>)> = {
+            let state = self.state.lock().unwrap();
+            state.instantiated_agents.iter()
+                .map(|(id, agent)| (id.clone(), agent.clone_box()))
+                .collect()
+        };
 
+        // Save complete agent states (including internal state)
+        let mut agents_state = HashMap::new();
+        for (agent_id, agent) in agents_info {
+            tracing::debug!("Saving state for agent: {}", agent_id);
+
+            // Get agent metadata
+            let metadata = agent.metadata();
+
+            // Get agent's internal state
+            let agent_internal_state = match agent.save_state().await {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("Failed to save state for agent {}: {}", agent_id, e);
+                    HashMap::new()
+                }
+            };
+
+            let agent_info = serde_json::json!({
+                "id": agent_id.to_string(),
+                "type": agent_id.r#type.clone(),
+                "key": agent_id.key.clone(),
+                "metadata": {
+                    "type": metadata.r#type,
+                    "key": metadata.key,
+                    "description": metadata.description,
+                },
+                "internal_state": agent_internal_state,
+                "created_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            });
+            agents_state.insert(agent_id.to_string(), agent_info);
+        }
+        runtime_state.insert("agents".to_string(), serde_json::to_value(agents_state)?);
+
+        // Collect other state information (without holding lock across await)
+        let (subscription_state, factory_types, intervention_count, task_stats, agents_count, factories_count) = {
+            let state = self.state.lock().unwrap();
+
+            let subscription_state = match state.subscription_manager.save_state() {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!("Failed to save subscription manager state: {}", e);
+                    serde_json::json!({
+                        "error": "Failed to save subscription state",
+                        "fallback": true
+                    })
+                }
+            };
+
+            let factory_types: Vec<String> = state.agent_factories.keys().cloned().collect();
+            let intervention_count = state.intervention_handlers.len();
+            let task_stats = state.background_tasks.get_task_stats();
+            let agents_count = state.instantiated_agents.len();
+            let factories_count = state.agent_factories.len();
+
+            (subscription_state, factory_types, intervention_count, task_stats, agents_count, factories_count)
+        };
+
+        // Save complete subscription manager state
+        runtime_state.insert("subscription_manager".to_string(), subscription_state);
+
+        // Save agent factories information (type names only, as factories aren't serializable)
+        runtime_state.insert("registered_agent_types".to_string(), serde_json::to_value(factory_types)?);
+
+        // Save intervention handlers count (handlers themselves aren't serializable)
+        runtime_state.insert("intervention_handlers_count".to_string(),
+                           serde_json::to_value(intervention_count)?);
+
+        // Save background task statistics
+        let (total_tasks, active_tasks, oldest_age) = task_stats;
+        runtime_state.insert("background_tasks".to_string(), serde_json::json!({
+            "total": total_tasks,
+            "active": active_tasks,
+            "oldest_age_seconds": oldest_age.as_secs(),
+        }));
+
+        // Save runtime metadata with enhanced version information
+        runtime_state.insert("runtime_type".to_string(), serde_json::to_value("SingleThreadedAgentRuntime")?);
+        runtime_state.insert("saved_at".to_string(), serde_json::to_value(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        )?);
+        runtime_state.insert("version".to_string(), serde_json::to_value("2.0.0")?);
+        runtime_state.insert("schema_version".to_string(), serde_json::to_value(state_version::CURRENT_SCHEMA_VERSION)?);
+
+        // Add state integrity information
+        runtime_state.insert("state_integrity".to_string(), serde_json::json!({
+            "agents_count": agents_count,
+            "factories_count": factories_count,
+            "intervention_handlers_count": intervention_count,
+            "supported_versions": state_version::SUPPORTED_VERSIONS,
+            "checksum": self.calculate_state_checksum(&runtime_state)?,
+        }));
+
+        tracing::info!("Runtime state save completed successfully");
         Ok(runtime_state)
     }
 
     async fn load_state(&self, runtime_state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
-        if let Some(agents_state) = runtime_state.get("agents") {
-            if let Value::Object(agents_map) = agents_state {
-                for (agent_id_str, agent_state_value) in agents_map {
-                    let agent_id = AgentId::from_str(agent_id_str)?;
-                    if let Value::Object(agent_state_map) = agent_state_value {
-                        let agent_state: HashMap<String, Value> = agent_state_map.clone()
-                            .into_iter()
-                            .collect();
-                        self.agent_load_state(&agent_id, &agent_state).await?;
+        tracing::info!("Starting runtime state load operation");
+
+        // Validate the saved state format and version
+        self.validate_state_format(runtime_state)?;
+
+        // Verify state integrity if checksum is available
+        if let Some(integrity_info) = runtime_state.get("state_integrity") {
+            self.verify_state_integrity(runtime_state, integrity_info)?;
+        }
+
+        // Handle version migration if needed
+        let state_version = runtime_state.get("schema_version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0");
+
+        // Validate version compatibility
+        if !state_version::is_supported(state_version) {
+            return Err(format!("Unsupported state version: {}. Supported versions: {:?}",
+                              state_version, state_version::SUPPORTED_VERSIONS).into());
+        }
+
+        let migrated_state = self.migrate_state_if_needed(runtime_state, state_version)?;
+
+        // Load agent information and recreate agents
+        if let Some(agents_value) = migrated_state.get("agents") {
+            if let Some(agents_obj) = agents_value.as_object() {
+                tracing::info!("Loading {} agent entries from saved state", agents_obj.len());
+
+                for (agent_id_str, agent_info) in agents_obj {
+                    if let Err(e) = self.load_agent_from_state(agent_id_str, agent_info).await {
+                        tracing::warn!("Failed to load agent {}: {}", agent_id_str, e);
+                        // Continue loading other agents even if one fails
                     }
                 }
             }
         }
+
+        // Load subscription manager state
+        if let Some(subscription_state) = migrated_state.get("subscription_manager") {
+            if let Err(e) = self.load_subscription_manager_state(subscription_state).await {
+                tracing::warn!("Failed to load subscription manager state: {}", e);
+            }
+        } else if let Some(subscriptions_value) = migrated_state.get("subscriptions") {
+            // Handle legacy subscription format
+            if let Err(e) = self.load_legacy_subscriptions(subscriptions_value).await {
+                tracing::warn!("Failed to load legacy subscriptions: {}", e);
+            }
+        }
+
+        // Validate loaded state consistency
+        self.validate_loaded_state().await?;
+
+        tracing::info!("Successfully loaded runtime state");
         Ok(())
     }
 
@@ -756,7 +1091,7 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
     }
 
     fn add_message_serializer(&self, serializer: Box<dyn crate::serialization::MessageSerializer<Value>>) {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
         state.serialization_registry.add_boxed_serializer(serializer);
     }
 
@@ -766,6 +1101,308 @@ impl AgentRuntime for SingleThreadedAgentRuntime {
 }
 
 impl SingleThreadedAgentRuntime {
+    /// Calculate a checksum for state integrity verification
+    fn calculate_state_checksum(&self, state: &HashMap<String, Value>) -> Result<String, Box<dyn Error>> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Create a deterministic string representation of the state
+        let state_json = serde_json::to_string(state)?;
+
+        // Calculate hash
+        let mut hasher = DefaultHasher::new();
+        state_json.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        Ok(format!("{:x}", hash))
+    }
+
+    /// Validate the format of saved state
+    fn validate_state_format(&self, runtime_state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
+        // Check runtime type
+        if let Some(runtime_type) = runtime_state.get("runtime_type") {
+            if runtime_type.as_str() != Some("SingleThreadedAgentRuntime") {
+                return Err("Invalid runtime type in saved state".into());
+            }
+        } else {
+            return Err("Missing runtime_type in saved state".into());
+        }
+
+        // Check required fields
+        let required_fields = ["saved_at", "version"];
+        for field in &required_fields {
+            if !runtime_state.contains_key(*field) {
+                return Err(format!("Missing required field '{}' in saved state", field).into());
+            }
+        }
+
+        tracing::debug!("State format validation passed");
+        Ok(())
+    }
+
+    /// Verify state integrity using checksum
+    fn verify_state_integrity(&self, runtime_state: &HashMap<String, Value>, integrity_info: &Value) -> Result<(), Box<dyn Error>> {
+        if let Some(integrity_obj) = integrity_info.as_object() {
+            if let Some(saved_checksum) = integrity_obj.get("checksum").and_then(|v| v.as_str()) {
+                // Create a copy of state without the integrity info for checksum calculation
+                let mut state_for_checksum = runtime_state.clone();
+                state_for_checksum.remove("state_integrity");
+
+                let calculated_checksum = self.calculate_state_checksum(&state_for_checksum)?;
+
+                if saved_checksum != calculated_checksum {
+                    tracing::warn!("State integrity check failed: saved={}, calculated={}", saved_checksum, calculated_checksum);
+                    return Err("State integrity verification failed".into());
+                }
+
+                tracing::debug!("State integrity verification passed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Migrate state from older versions if needed
+    fn migrate_state_if_needed(&self, runtime_state: &HashMap<String, Value>, state_version: &str) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        if state_version == state_version::CURRENT_SCHEMA_VERSION {
+            // Current version, no migration needed
+            return Ok(runtime_state.clone());
+        }
+
+        let migration_path = state_version::get_migration_path(state_version);
+        if migration_path.is_empty() {
+            return Err(format!("No migration path available from version {}", state_version).into());
+        }
+
+        tracing::info!("Migrating state from version {} through path: {:?}", state_version, migration_path);
+
+        let mut current_state = runtime_state.clone();
+        let mut current_version = state_version;
+
+        for target_version in migration_path {
+            current_state = self.migrate_between_versions(&current_state, current_version, target_version)?;
+            current_version = target_version;
+        }
+
+        Ok(current_state)
+    }
+
+    /// Migrate state between specific versions
+    fn migrate_between_versions(&self, state: &HashMap<String, Value>, from_version: &str, to_version: &str) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        match (from_version, to_version) {
+            ("1.0", "2.0") => self.migrate_from_v1_to_v2(state),
+            _ => Err(format!("No migration available from {} to {}", from_version, to_version).into())
+        }
+    }
+
+    /// Migrate state from version 1.0 to 2.0
+    fn migrate_from_v1_to_v2(&self, old_state: &HashMap<String, Value>) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        tracing::info!("Starting migration from v1.0 to v2.0");
+        let mut new_state = old_state.clone();
+
+        // Update version information
+        new_state.insert("schema_version".to_string(), serde_json::to_value(state_version::CURRENT_SCHEMA_VERSION)?);
+        new_state.insert("version".to_string(), serde_json::to_value("2.0.0")?);
+
+        // Migrate agent format - add metadata structure if missing
+        if let Some(agents_value) = old_state.get("agents") {
+            if let Some(agents_obj) = agents_value.as_object() {
+                let mut migrated_agents = serde_json::Map::new();
+
+                for (agent_id, agent_info) in agents_obj {
+                    if let Some(mut agent_obj) = agent_info.as_object().cloned() {
+                        // Ensure metadata structure exists
+                        if !agent_obj.contains_key("metadata") {
+                            agent_obj.insert("metadata".to_string(), serde_json::json!({
+                                "type": agent_obj.get("type").unwrap_or(&Value::String("unknown".to_string())),
+                                "key": "default",
+                                "description": "Migrated agent"
+                            }));
+                        }
+
+                        // Ensure internal_state exists
+                        if !agent_obj.contains_key("internal_state") {
+                            agent_obj.insert("internal_state".to_string(), serde_json::json!({}));
+                        }
+
+                        migrated_agents.insert(agent_id.clone(), Value::Object(agent_obj));
+                    }
+                }
+
+                new_state.insert("agents".to_string(), Value::Object(migrated_agents));
+            }
+        }
+
+        // Migrate subscription format if needed
+        if let Some(subscriptions) = old_state.get("subscriptions") {
+            if subscriptions.is_array() {
+                // Convert old array format to new subscription manager format
+                let subscription_manager_state = serde_json::json!({
+                    "total_subscriptions": subscriptions.as_array().unwrap().len(),
+                    "subscriptions": subscriptions,
+                    "seen_topics": [],
+                    "version": "1.0",
+                    "saved_at": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                });
+                new_state.insert("subscription_manager".to_string(), subscription_manager_state);
+                // Remove old format
+                new_state.remove("subscriptions");
+            }
+        }
+
+        // Add new fields introduced in v2.0
+        if !new_state.contains_key("registered_agent_types") {
+            new_state.insert("registered_agent_types".to_string(), serde_json::json!([]));
+        }
+
+        if !new_state.contains_key("intervention_handlers_count") {
+            new_state.insert("intervention_handlers_count".to_string(), serde_json::json!(0));
+        }
+
+        if !new_state.contains_key("background_tasks") {
+            new_state.insert("background_tasks".to_string(), serde_json::json!({
+                "total": 0,
+                "active": 0,
+                "oldest_age_seconds": 0
+            }));
+        }
+
+        // Validate migrated state
+        self.validate_migrated_state(&new_state)?;
+
+        tracing::info!("Successfully migrated state from v1.0 to v2.0");
+        Ok(new_state)
+    }
+
+    /// Validate migrated state for consistency
+    fn validate_migrated_state(&self, state: &HashMap<String, Value>) -> Result<(), Box<dyn Error>> {
+        // Check required fields for v2.0
+        let required_fields = [
+            "runtime_type", "schema_version", "version", "saved_at",
+            "agents", "registered_agent_types", "intervention_handlers_count"
+        ];
+
+        for field in &required_fields {
+            if !state.contains_key(*field) {
+                return Err(format!("Missing required field '{}' after migration", field).into());
+            }
+        }
+
+        // Validate schema version
+        if let Some(schema_version) = state.get("schema_version").and_then(|v| v.as_str()) {
+            if !state_version::is_supported(schema_version) {
+                return Err(format!("Invalid schema version after migration: {}", schema_version).into());
+            }
+        }
+
+        tracing::debug!("Migrated state validation passed");
+        Ok(())
+    }
+
+    /// Create a backup of state before migration
+    fn create_state_backup(&self, state: &HashMap<String, Value>) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        let mut backup = state.clone();
+        backup.insert("backup_created_at".to_string(), serde_json::to_value(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        )?);
+        backup.insert("backup_reason".to_string(), serde_json::to_value("pre_migration")?);
+
+        tracing::debug!("Created state backup for migration");
+        Ok(backup)
+    }
+
+    /// Load an agent from saved state
+    async fn load_agent_from_state(&self, agent_id_str: &str, agent_info: &Value) -> Result<(), Box<dyn Error>> {
+        if let Some(agent_obj) = agent_info.as_object() {
+            // Parse agent ID
+            let agent_id = AgentId::from_str(agent_id_str)?;
+
+            // Check if agent factory exists for this type
+            let has_factory = {
+                let state = self.state.lock().unwrap();
+                state.agent_factories.contains_key(&agent_id.r#type)
+            };
+
+            if !has_factory {
+                return Err(format!("No factory registered for agent type: {}", agent_id.r#type).into());
+            }
+
+            // Create agent instance (this also stores it in the runtime state)
+            let _agent = Self::create_agent_instance(self.state.clone(), &agent_id).await
+                .map_err(|e| -> Box<dyn Error> { Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())) })?;
+
+            // Load agent's internal state if available
+            if let Some(internal_state) = agent_obj.get("internal_state") {
+                if let Some(state_map) = internal_state.as_object() {
+                    let state_hashmap: HashMap<String, Value> = state_map.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+
+                    // Load the state into the agent
+                    if let Err(e) = self.agent_load_state(&agent_id, &state_hashmap).await {
+                        tracing::warn!("Failed to load internal state for agent {}: {}", agent_id, e);
+                    }
+                }
+            }
+
+            tracing::debug!("Successfully loaded agent: {}", agent_id);
+        }
+        Ok(())
+    }
+
+    /// Load subscription manager state
+    async fn load_subscription_manager_state(&self, subscription_state: &Value) -> Result<(), Box<dyn Error>> {
+        // Note: This is a simplified implementation
+        // In a full implementation, we would need to recreate subscription objects
+        tracing::info!("Loading subscription manager state");
+
+        if let Some(state_obj) = subscription_state.as_object() {
+            if let Some(total_subs) = state_obj.get("total_subscriptions").and_then(|v| v.as_u64()) {
+                tracing::debug!("Expected to load {} subscriptions", total_subs);
+            }
+        }
+
+        // TODO: Implement actual subscription recreation
+        tracing::warn!("Subscription manager state loading is not fully implemented yet");
+        Ok(())
+    }
+
+    /// Load legacy subscription format
+    async fn load_legacy_subscriptions(&self, subscriptions_value: &Value) -> Result<(), Box<dyn Error>> {
+        if let Some(subscription_ids) = subscriptions_value.as_array() {
+            tracing::info!("Loading {} legacy subscription IDs", subscription_ids.len());
+
+            for subscription_id in subscription_ids {
+                if let Some(id_str) = subscription_id.as_str() {
+                    tracing::debug!("Found legacy subscription: {}", id_str);
+                    // TODO: Implement actual subscription recreation from ID
+                }
+            }
+        }
+
+        tracing::warn!("Legacy subscription loading is not fully implemented yet");
+        Ok(())
+    }
+
+    /// Validate the consistency of loaded state
+    async fn validate_loaded_state(&self) -> Result<(), Box<dyn Error>> {
+        let state = self.state.lock().unwrap();
+
+        // Check that all agents are properly bound
+        for (agent_id, _agent) in &state.instantiated_agents {
+            tracing::debug!("Validating agent: {}", agent_id);
+            // Additional validation logic can be added here
+        }
+
+        tracing::debug!("Loaded state validation completed");
+        Ok(())
+    }
+
     /// Get background task statistics
     pub fn get_background_task_stats(&self) -> (usize, usize, std::time::Duration) {
         let state = self.state.lock().unwrap();

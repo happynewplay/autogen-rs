@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 fn is_valid_agent_type(value: &str) -> bool {
-    let re = Regex::new(r"^[\w\-\.]+\Z").unwrap();
+    let re = Regex::new(r"^[\w\-\.]+$").unwrap();
     re.is_match(value)
 }
 
