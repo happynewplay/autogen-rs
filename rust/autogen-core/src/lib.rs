@@ -51,3 +51,7 @@ pub mod models;
 pub mod tool_agent;
 pub mod tools;
 pub mod utils;
+
+// New modules for agent chat
+pub mod agentchat;
+pub mod message;
