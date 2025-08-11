@@ -6,10 +6,12 @@
 
 pub mod json_to_pydantic;
 pub mod load_json;
+pub mod validation;
 
 // Re-export commonly used items
 pub use json_to_pydantic::{JSONSchemaToRust, SchemaConversionError};
 pub use load_json::extract_json_from_str;
+pub use validation::validate_json_with_schema;
 
 use serde_json::Value;
 use std::any::{Any, TypeId};
